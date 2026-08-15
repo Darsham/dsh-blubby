@@ -1,0 +1,15 @@
+# 依赖与构建产物
+node_modules/
+lib/
+*.tsbuildinfo
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+
+# Python 缓存（历史素材管线遗留）
+__pycache__/
+*.pyc

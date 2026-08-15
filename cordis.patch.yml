@@ -1,0 +1,7 @@
+# dsh-blubby bundle patch: inserts its plugin row into the web plugin roster.
+# One row mounts BOTH halves: the host side (session event projection, state
+# machine, /api/blubby/* RPC) and the browser side (client.js floating pet
+# plus the built-in video assets under assets/blubby/).
+- insert:
+    - id: blubby
+      name: 'dsh-blubby'

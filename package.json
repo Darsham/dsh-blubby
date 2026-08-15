@@ -1,0 +1,73 @@
+{
+  "name": "dsh-blubby",
+  "description": "小咕噜 —— 一只蓝鲸连体衣小女孩，dsh web 界面的桌面宠物。订阅会话事件驱动动画：游泳/疑惑/办公/吃饱/挨扇，直接播原视频素材（无图集、无抽帧）。",
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsdown",
+    "typecheck": "tsc -p tsconfig.json --pretty false",
+    "prepare": "tsdown"
+  },
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/**/*.js",
+    "lib/**/*.js.map",
+    "lib/**/*.d.ts",
+    "lib/**/*.d.ts.map",
+    "src",
+    "cordis.patch.yml",
+    "assets"
+  ],
+  "license": "MIT",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-host-webserver": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@types/node": "^22.20.0",
+    "@types/react": "~18.3.1",
+    "@types/react-dom": "~18.3.0",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Darsham/dsh-blubby.git"
+  }
+}
