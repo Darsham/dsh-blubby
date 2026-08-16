@@ -20,6 +20,7 @@ import { BlubbyEntry, type BlubbyInjected, type BlubbySegments } from './BlubbyE
 /** The host blubby API as the browser sees it (same-origin JSON endpoints). */
 interface BlubbyHttpApi {
   state(): Promise<BlubbyStateView>
+  setVisible(visible: boolean): Promise<{ ok: boolean }>
 }
 
 /** Same-origin JSON fetch helper. */
@@ -34,6 +35,20 @@ async function blubbyFetch<T>(path: string): Promise<T> {
 /** The live host API instance (always defined; failures surface per call). */
 const blubbyApi: BlubbyHttpApi = {
   state: () => blubbyFetch('/api/blubby/state'),
+  setVisible: (visible) => blubbyPost('/api/blubby/set-visible', { visible }) as Promise<{ ok: boolean }>,
+}
+
+/** POST one JSON body to a blubby endpoint. */
+async function blubbyPost(path: string, body: unknown): Promise<unknown> {
+  const response = await fetch(path, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!response.ok) {
+    throw new Error('blubby ' + path + ' failed: ' + response.status)
+  }
+  return response.json() as Promise<unknown>
 }
 
 /** Poll interval for the host snapshot. */
@@ -87,6 +102,12 @@ export function apply(ctx: ClientContext): void {
       snapshot: latest,
       transportFailed: failed,
       segments,
+      onHide: () => {
+        void blubbyApi.setVisible(false)
+      },
+      onSummon: () => {
+        void blubbyApi.setVisible(true)
+      },
     }
     petRoot.render(createElement(BlubbyEntry, injected))
   }

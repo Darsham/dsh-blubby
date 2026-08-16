@@ -45,6 +45,10 @@ export interface BlubbyInjected {
   transportFailed: boolean
   /** Segment manifest loaded from /blubby/segments.json. */
   segments: BlubbySegments | null
+  /** Hide the pet (host persists; client shows a summon button). */
+  onHide: () => void
+  /** Summon the hidden pet back. */
+  onSummon: () => void
 }
 
 /** Playback mode per track. */
@@ -196,7 +200,7 @@ function SatietyRing({ percent }: { percent: number | null }): JSX.Element {
  * right segmented sequence, and handles local interactions (drag, hover,
  * wander, fish snack, tap-to-open stats panel, satiety burp).
  */
-export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjected): ReturnType<typeof createPortal> {
+export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSummon }: BlubbyInjected): ReturnType<typeof createPortal> {
   const hostTrack: BlubbyTrack = snapshot?.track ?? 'idle'
   // Local override: hover shows 疑惑脸 regardless of host activity.
   const [hovered, setHovered] = useState(false)
@@ -217,6 +221,10 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   const [panelOpen, setPanelOpen] = useState(false)
   // "好撑" burp effect (satiety grew past the threshold).
   const [burping, setBurping] = useState(false)
+  // 抽他特效：被扇巴掌（抖动 + 巴掌印 + 气泡）。
+  const [slapped, setSlapped] = useState(false)
+  // 本地隐藏（乐观更新：点了立即消失，不等下一次 poll）。
+  const [localHidden, setLocalHidden] = useState(false)
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const lastPosRef = useRef(pos)
   const dirTimer = useRef<number | undefined>(undefined)
@@ -225,6 +233,9 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   const swimAngle = useRef(0)
   // Pointer-down snapshot, to tell a tap (→ open panel) from a drag.
   const downRef = useRef<{ x: number; y: number; t: number } | null>(null)
+
+  const hidden = localHidden || snapshot?.hidden === true
+  const git = snapshot?.git
 
   const track: BlubbyTrack = hovered && !dragging ? 'waiting' : settledIdle ? 'idle' : hostTrack
 
@@ -290,6 +301,18 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     }
     prevSatietyRef.current = satietyPercent
   }, [satietyPercent])
+
+  // ---- 抽他：面板按钮触发，抖动 + 巴掌印 + 气泡 3s ----
+  const slapTimer = useRef<number | undefined>(undefined)
+  const onSlap = (): void => {
+    setSlapped(true)
+    setPanelOpen(false)
+    if (slapTimer.current !== undefined) window.clearTimeout(slapTimer.current)
+    slapTimer.current = window.setTimeout(() => setSlapped(false), 3000)
+  }
+  useEffect(() => () => {
+    if (slapTimer.current !== undefined) window.clearTimeout(slapTimer.current)
+  }, [])
 
   // Park at the desk spot while 办公/完成 (and clear any swim timers).
   useEffect(() => {
@@ -439,14 +462,15 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     if (frameIdx >= playlist.frames.length - 3) setSnacks([]) // mouth closed again
   }, [track, frameIdx, playlist, segments, snacks, snapshot])
 
-  const bubble = burping ? '好撑…吃不下啦' : (!hovered ? snapshot?.bubble : undefined)
+  const bubble = slapped ? '呜哇！！为什么打我…' : burping ? '好撑…吃不下啦' : (!hovered ? snapshot?.bubble : undefined)
 
-  // ---- stats strip: satiety ring · cost · efficiency (常驻) ----
+  // ---- stats strip: satiety ring · cost · efficiency · git (常驻) ----
   const satiety = snapshot?.satiety
   const cost = snapshot?.cost ?? 0
   const efficiency = snapshot?.efficiency ?? null
   const stats = snapshot?.stats
   const food = snapshot?.food
+  const gitText = git && git.branch !== '' ? `${git.branch}${git.dirtyFiles + git.untrackedFiles > 0 ? ` ●${git.dirtyFiles + git.untrackedFiles}` : ''}` : null
   const statsStrip = (
     <div
       style={{
@@ -476,6 +500,12 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       <span>{formatCost(cost)}</span>
       <span style={{ opacity: 0.35 }}>|</span>
       <span>⚡{efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}</span>
+      {gitText !== null && (
+        <>
+          <span style={{ opacity: 0.35 }}>|</span>
+          <span style={git && git.conflicts > 0 ? { color: '#ff6b6b' } : { opacity: 0.9 }}>🛠 {gitText}</span>
+        </>
+      )}
     </div>
   )
 
@@ -531,6 +561,55 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           </div>
         </div>
       )}
+      {git !== null && git !== undefined && git.branch !== '' && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', opacity: 0.9 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span>🛠 {git.branch}</span>
+            {git.head !== '' && <span style={{ opacity: 0.5 }}>· {git.head}</span>}
+            {git.conflicts > 0 && <span style={{ color: '#ff6b6b' }}>⚠ 冲突 {git.conflicts}</span>}
+          </div>
+          <div style={{ opacity: 0.7 }}>
+            {git.dirtyFiles > 0 && <span style={{ color: '#ffb347' }}>●{git.dirtyFiles} 修改</span>}
+            {git.dirtyFiles > 0 && git.untrackedFiles > 0 && <span> · </span>}
+            {git.untrackedFiles > 0 && <span style={{ color: '#4bd6c8' }}>＋{git.untrackedFiles} 未跟踪</span>}
+            {git.dirtyFiles === 0 && git.untrackedFiles === 0 && <span>干净</span>}
+          </div>
+        </div>
+      )}
+      <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)', display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          onClick={onSlap}
+          style={{
+            flex: 1,
+            padding: '5px 0',
+            borderRadius: 8,
+            border: '1px solid rgba(255,107,107,0.4)',
+            background: 'rgba(255,107,107,0.12)',
+            color: '#ff8a8a',
+            fontSize: 12,
+            cursor: 'pointer',
+          }}
+        >
+          👋 抽他
+        </button>
+        <button
+          type="button"
+          onClick={() => { setLocalHidden(true); setPanelOpen(false); onHide() }}
+          style={{
+            flex: 1,
+            padding: '5px 0',
+            borderRadius: 8,
+            border: '1px solid rgba(255,255,255,0.14)',
+            background: 'rgba(255,255,255,0.05)',
+            color: '#c8d0e0',
+            fontSize: 12,
+            cursor: 'pointer',
+          }}
+        >
+          🙈 隐藏
+        </button>
+      </div>
     </div>
   ) : null
 
@@ -555,8 +634,12 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
             : 'left 1.2s ease-in-out, top 1.2s ease-in-out',
         userSelect: 'none',
         touchAction: 'none',
-        // 好撑打嗝：轻微上下抖动。
-        animation: burping ? 'dshBlubbyBurp 0.5s ease-in-out 3' : undefined,
+        // 好撑打嗝：轻微上下抖动；抽他：快速左右甩。
+        animation: slapped
+          ? 'dshBlubbySlap 0.35s ease-in-out 5'
+          : burping
+            ? 'dshBlubbyBurp 0.5s ease-in-out 3'
+            : undefined,
       }}
       onPointerDown={onPointerDown}
       onMouseEnter={() => { if (!dragging) setHovered(true) }}
@@ -575,6 +658,22 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           background: 'transparent',
         }}
       />
+      {/* 巴掌印：被抽他时显示（CSS，无素材） */}
+      {slapped && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            pointerEvents: 'none',
+            zIndex: 2,
+          }}
+        >
+          <div style={{ fontSize: 64, transform: 'rotate(-18deg)', animation: 'dshBlubbySlapMark 0.45s ease-out 1 forwards' }}>✋</div>
+        </div>
+      )}
       {/* CSS-drawn fish snacks (done state), no asset — one per 1500 tokens */}
       {snacks.map((s) => (
         <div
@@ -624,6 +723,19 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           25% { transform: translateY(-10px); }
           75% { transform: translateY(-4px); }
         }
+        @keyframes dshBlubbySlap {
+          0%, 100% { transform: translateX(0) rotate(0deg); }
+          20% { transform: translateX(-14px) rotate(-8deg); }
+          40% { transform: translateX(12px) rotate(7deg); }
+          60% { transform: translateX(-10px) rotate(-5deg); }
+          80% { transform: translateX(8px) rotate(4deg); }
+        }
+        @keyframes dshBlubbySlapMark {
+          0% { opacity: 0; transform: rotate(-18deg) scale(2.2); }
+          30% { opacity: 1; transform: rotate(-18deg) scale(0.92); }
+          55% { transform: rotate(-18deg) scale(1.05); }
+          70%, 100% { opacity: 0.92; transform: rotate(-18deg) scale(1); }
+        }
       `}</style>
       {bubble !== undefined && (
         <div
@@ -669,6 +781,32 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       )}
     </div>
   )
+
+  if (hidden) {
+    return createPortal(
+      <button
+        type="button"
+        onClick={() => { setLocalHidden(false); onSummon() }}
+        style={{
+          position: 'fixed',
+          right: 32,
+          bottom: 32,
+          zIndex: 2147483000,
+          padding: '8px 14px',
+          borderRadius: 999,
+          border: '1px solid rgba(255,255,255,0.12)',
+          background: 'rgba(14,16,26,0.85)',
+          color: '#c8d0e0',
+          fontSize: 13,
+          cursor: 'pointer',
+          boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        }}
+      >
+        🐳 召唤小咕噜
+      </button>,
+      document.body,
+    )
+  }
 
   return createPortal(float, document.body)
 }

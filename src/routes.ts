@@ -133,6 +133,10 @@ export function makeBlubbyRoutes(deps: { service: BlubbyService; assetsDir: stri
   const { service, assetsDir } = deps
   const apiRoutes: WebRoute[] = [
     getRoute(BLUBBY_API_PREFIX + '/state', () => service.state()),
+    postRoute(BLUBBY_API_PREFIX + '/set-visible', (body) => {
+      service.setVisible(body.visible === true)
+      return Promise.resolve({ ok: true })
+    }),
   ]
 
   const assetRoute: WebRoute = {
