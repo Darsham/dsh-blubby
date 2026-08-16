@@ -1,7 +1,9 @@
 /**
  * BlubbyEntry — the floating 小咕噜. One React root on document.body,
- * driven by the host snapshot polled every 2s. The pet plays raw mp4
- * videos (no spritesheet): each track is one mp4 under /blubby/<track>.mp4.
+ * driven by the host snapshot polled every 2s. The pet plays segmented
+ * keyframe sequences (transparent webp, no mp4): each state is split into
+ * initial → enter → doing (loopable) → exit segments so the doing phase
+ * can be repeated to extend the animation duration.
  * Local interactions that never touch the host:
  *   - mouse hover → 疑惑脸 (waiting track)
  *   - idle swimming → the pet wanders the lower half of the viewport
@@ -15,29 +17,39 @@ import { createPortal } from 'react-dom'
 import type { BlubbyStateView } from '../index.ts'
 import type { BlubbyTrack } from '../state.ts'
 
+/** Segment manifest shape (mirrors assets/blubby/segments.json). */
+export interface BlubbySegments {
+  frameMs: number
+  size: number
+  states: Record<BlubbyTrack, {
+    segments: Record<'initial' | 'enter' | 'doing' | 'exit', string[]>
+    loopable: boolean
+  }>
+}
+
 /** Props injected by the plugin apply body. */
 export interface BlubbyInjected {
   /** Latest host snapshot; null before the first successful fetch. */
   snapshot: BlubbyStateView | null
   /** True when the last poll failed (show a sad placeholder). */
   transportFailed: boolean
+  /** Segment manifest loaded from /blubby/segments.json. */
+  segments: BlubbySegments | null
 }
 
-/** Asset URL for one track. */
-function trackUrl(track: BlubbyTrack): string {
-  return `/blubby/${track}.mp4`
+/** Tracks that settle back to idle after a one-shot play. */
+function isOneShot(track: BlubbyTrack): boolean {
+  return track === 'done' || track === 'failed'
 }
 
-/** Tracks that loop; one-shot tracks (done/failed) play once then settle. */
-function loops(track: BlubbyTrack): boolean {
-  return track === 'idle' || track === 'waiting' || track === 'running'
-}
+/** How many times the doing segment repeats before the exit segment. */
+const DOING_REPEAT = 3
 
 /** The bottom-right desk spot the pet parks at while 办公. */
 const DESK_RIGHT = 32
 const DESK_BOTTOM = 96
 
-/** Pet rendered size (video is 960x960; scale down to a desktop pet). */
+/** Pet rendered size (source frames are 240x240; scale to a desktop pet). */
 const PET_SIZE = 220
 
 /** Random wander target within the lower half of the viewport. */
@@ -48,10 +60,32 @@ function wanderTarget(): { right: number; bottom: number } {
 }
 
 /**
- * The floating pet body. Pure presentational: reads the snapshot, plays the
- * right video, and handles local interactions (hover, wander, fish snack).
+ * Build the flat frame playlist for a track:
+ * initial → enter → doing × DOING_REPEAT → exit.
+ * One-shot tracks (done/failed) end the playlist at the last exit frame;
+ * looping tracks cycle the whole playlist forever.
  */
-export function BlubbyEntry({ snapshot, transportFailed }: BlubbyInjected): ReturnType<typeof createPortal> {
+function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): string[] | null {
+  if (!segments) return null
+  const state = segments.states[track]
+  if (!state) return null
+  const seg = state.segments
+  return [
+    ...seg.initial,
+    ...seg.enter,
+    ...seg.doing,
+    ...seg.doing,
+    ...seg.doing,
+    ...seg.exit,
+  ]
+}
+
+/**
+ * The floating pet body. Pure presentational: reads the snapshot, plays the
+ * right segmented sequence, and handles local interactions (hover, wander,
+ * fish snack).
+ */
+export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjected): ReturnType<typeof createPortal> {
   const hostTrack: BlubbyTrack = snapshot?.track ?? 'idle'
   // Local override: hover shows 疑惑脸 regardless of host activity.
   const [hovered, setHovered] = useState(false)
@@ -89,15 +123,38 @@ export function BlubbyEntry({ snapshot, transportFailed }: BlubbyInjected): Retu
     if (hostTrack !== 'done' && hostTrack !== 'failed') setSettledIdle(false)
   }, [hostTrack])
 
-  const videoUrl = trackUrl(track)
-  const videoKey = useMemo(() => videoUrl, [videoUrl])
+  // ---- segmented frame player ----
+  const playlist = useMemo(() => buildPlaylist(track, segments), [track, segments])
+  const [frameIdx, setFrameIdx] = useState(0)
+  const frameMs = segments?.frameMs ?? 125
 
-  const onEnded = (): void => {
-    // One-shot track finished: settle to idle locally (host settles on its
-    // own timer; this just avoids waiting out the poll lag).
-    if (!loops(track)) setSettledIdle(true)
-  }
+  // Restart the playlist whenever the track changes.
+  useEffect(() => {
+    setFrameIdx(0)
+  }, [track, segments])
 
+  // Advance the playlist on a fixed rhythm; one-shot tracks stop at the end.
+  useEffect(() => {
+    if (!playlist) return
+    const timer = window.setInterval(() => {
+      setFrameIdx((idx) => {
+        const next = idx + 1
+        if (next < playlist.length) return next
+        if (isOneShot(track)) return idx // hold the last exit frame
+        return 0 // looping track: cycle the whole playlist
+      })
+    }, frameMs)
+    return () => window.clearInterval(timer)
+  }, [playlist, track, frameMs])
+
+  // One-shot finished (we're holding the final frame): settle locally.
+  useEffect(() => {
+    if (isOneShot(track) && playlist && frameIdx === playlist.length - 1) {
+      setSettledIdle(true)
+    }
+  }, [track, playlist, frameIdx])
+
+  const frameUrl = playlist ? `/blubby/frames/${playlist[frameIdx]}` : null
   const bubble = !hovered ? snapshot?.bubble : undefined
 
   const float = (
@@ -117,22 +174,16 @@ export function BlubbyEntry({ snapshot, transportFailed }: BlubbyInjected): Retu
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
     >
-      <video
-        key={videoKey}
-        src={videoUrl}
-        autoPlay
-        muted
-        playsInline
-        loop={loops(track)}
-        onEnded={onEnded}
+      <img
+        src={frameUrl ?? ''}
+        alt="小咕噜"
+        draggable={false}
         style={{
           width: '100%',
           height: '100%',
           objectFit: 'contain',
           display: 'block',
-          borderRadius: 12,
-          // 米白底 mp4 直接播放；等透明素材后再去掉底色混合
-          mixBlendMode: 'multiply',
+          // 透明 webp 关键帧直接叠加，无底色混合
           background: 'transparent',
         }}
       />

@@ -19,15 +19,14 @@ export const BLUBBY_API_PREFIX = '/api/blubby'
 /** Browser-facing base path of the pet asset routes ('/blubby/<file>'). */
 export const BLUBBY_ASSET_PREFIX = '/blubby'
 
-/** The asset files the browser half may request (video tracks + manifest). */
+/** The asset files the browser half may request (segment manifest). */
 export const BLUBBY_ASSET_FILES = [
-  'idle.mp4',
-  'waiting.mp4',
-  'running.mp4',
-  'done.mp4',
-  'failed.mp4',
-  'bg.jpg',
+  'segments.json',
 ] as const
+
+/** Frame files live under '<assets>/frames/'; names are generated as
+ * '<state>_<segment>_<NN>.webp' — validate with a strict pattern. */
+export const BLUBBY_FRAME_RE = /^[a-z]+_(initial|enter|doing|exit)_\d{2}\.webp$/
 
 /** Absolute package root, resolved from a module URL (lib/ or src/). */
 export function blubbyPackageRoot(importMetaUrl: string): string {
@@ -161,8 +160,39 @@ export function makeBlubbyRoutes(deps: { service: BlubbyService; assetsDir: stri
         return
       }
       const name = decodeURIComponent(segments[1])
-      // Whitelist: only the declared video tracks are servable.
+      // Whitelist: only the declared manifest is servable at the top level.
       if (!(BLUBBY_ASSET_FILES as readonly string[]).includes(name)) {
+        // Frames live under '/blubby/frames/<file>' — validate strictly.
+        if (name === 'frames' && segments[2] !== undefined) {
+          const frame = decodeURIComponent(segments[2])
+          if (!BLUBBY_FRAME_RE.test(frame)) {
+            res.writeHead(404)
+            res.end()
+            return
+          }
+          const file = join(assetsDir, 'frames', frame)
+          if (!existsSync(file)) {
+            res.writeHead(404)
+            res.end()
+            return
+          }
+          readFile(file).then((body) => {
+            res.writeHead(200, {
+              'content-type': mimeFor(file),
+              'content-length': String(body.byteLength),
+              'cache-control': 'public, max-age=86400',
+            })
+            if (req.method === 'HEAD') {
+              res.end()
+              return
+            }
+            res.end(body)
+          }, () => {
+            res.writeHead(404)
+            res.end()
+          })
+          return
+        }
         res.writeHead(404)
         res.end()
         return
