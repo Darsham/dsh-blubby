@@ -26,6 +26,12 @@ export interface BlubbySegments {
   size: number
   states: Record<BlubbyTrack, {
     segments: Record<'initial' | 'enter' | 'doing' | 'exit', string[]>
+    /** Per-frame horizontal centroid offsets (in @size px, relative to the
+     * doing segment's first frame) — the source frames drift forward inside
+     * the canvas while swimming, so the player translates the img by the
+     * negative offset to lock the visual body to the container (no jerk at
+     * the loop point). Only idle defines it today. */
+    offsets?: { doing: number[] }
   }>
 }
 
@@ -316,6 +322,15 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // CSS-drawn snacks from above into the mouth (~48% height, 50% width).
   // The count scales with the turn's output tokens (more tokens → more food).
   const frameUrl = playlist ? `/blubby/frames/${playlist.frames[frameIdx]}` : null
+  // Centroid compensation: idle doing frames drift forward inside the canvas
+  // (~33px over the 7-frame loop at @size=240), so shift the img back by the
+  // per-frame offset — the visual body stays locked to the container and the
+  // loop never jerks backward. Scale to the rendered size (PET_SIZE).
+  const doingOffsets = segments?.states.idle.offsets?.doing
+  const frameOff =
+    track === 'idle' && playlist && doingOffsets
+      ? (doingOffsets[frameIdx - playlist.doingStart] ?? 0) * (PET_SIZE / (segments?.size ?? 240))
+      : 0
   useEffect(() => {
     if (track !== 'done' || !playlist) return
     // The open-mouth frame is the 3rd frame of the enter segment: find its
@@ -367,7 +382,9 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           height: '100%',
           objectFit: 'contain',
           display: 'block',
-          transform: facingLeft ? 'scaleX(-1)' : undefined,
+          transform: facingLeft
+            ? `scaleX(-1) translateX(${frameOff}px)`
+            : `translateX(${-frameOff}px)`,
           background: 'transparent',
         }}
       />

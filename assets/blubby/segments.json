@@ -38,6 +38,17 @@
      "idle_exit_31.webp",
      "idle_exit_32.webp"
     ]
+   },
+   "offsets": {
+    "doing": [
+     0.0,
+     11.98,
+     17.35,
+     19.9,
+     22.75,
+     30.7,
+     33.42
+    ]
    }
   },
   "waiting": {
