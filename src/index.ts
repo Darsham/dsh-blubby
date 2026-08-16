@@ -20,6 +20,7 @@ import {
   type BlubbyStateSnapshot,
 } from './state.ts'
 import { blubbyAssetsDir, makeBlubbyRoutes } from './routes.ts'
+import { AliyunNlsAsr } from './asr.ts'
 
 /** Plugin configuration. */
 export interface BlubbyConfig {
@@ -54,11 +55,13 @@ declare module '@deepseek-ai/cordis' {
  * reads; event listeners update only in-memory state.
  */
 export class BlubbyService extends Service {
-  static inject: string[] = []
+  static inject: string[] = ['credentials']
 
   private readonly machine: BlubbyStateMachine
   private enabled: boolean
   private disposeActivity: (() => void) | undefined
+  /** 阿里云 NLS 一句话识别客户端（凭据走 ctx.credentials，本仓零密钥）。 */
+  private readonly nlsAsr: AliyunNlsAsr
   /** Session whose most recent meaningful event currently drives the pet. */
   private displaySession: Session | undefined
   private readonly sessionActivity = new WeakMap<Session, ProjectionRuntime>()
@@ -67,6 +70,7 @@ export class BlubbyService extends Service {
     super(ctx, 'blubby')
     this.machine = new BlubbyStateMachine()
     this.enabled = config.enabled ?? true
+    this.nlsAsr = new AliyunNlsAsr(ctx)
     this.syncActivity()
   }
 
@@ -78,6 +82,12 @@ export class BlubbyService extends Service {
   /** RPC: current pet state snapshot. */
   async state(): Promise<BlubbyStateView> {
     return this.view()
+  }
+
+  /** RPC: 一句话识别（PCM 16k/mono/16bit）→ 文本，供前端语音输入。 */
+  async asr(pcm: Buffer): Promise<{ text: string }> {
+    const text = await this.nlsAsr.recognize(pcm)
+    return { text }
   }
 
   /** Start or stop the session-activity listeners that drive the pet. */
@@ -144,7 +154,7 @@ export class BlubbyService extends Service {
 export const name = 'blubby'
 
 /** Required host services. */
-export const inject = ['webServer']
+export const inject = ['webServer', 'credentials']
 
 /**
  * Plugin body: instantiate the pet service and register its API + asset

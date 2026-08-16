@@ -51,7 +51,9 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@deepseek-ai/dsh-credentials": "0.0.1-rc.1"
+  },
   "devDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-client-runtime": "^0.1.0-rc.6",

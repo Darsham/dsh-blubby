@@ -126,10 +126,36 @@ function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): Blu
   }
 }
 
+/** 线性插值重采样到 16k（AudioContext 构造指定 sampleRate 可能不被采纳）。 */
+function resampleTo16k(data: Float32Array, fromRate: number): Float32Array {
+  if (fromRate === 16000) return data
+  const ratio = fromRate / 16000
+  const out = new Float32Array(Math.max(1, Math.round(data.length / ratio)))
+  for (let i = 0; i < out.length; i += 1) {
+    const pos = i * ratio
+    const i0 = Math.floor(pos)
+    const i1 = Math.min(i0 + 1, data.length - 1)
+    out[i] = (data[i0] ?? 0) + ((data[i1] ?? 0) - (data[i0] ?? 0)) * (pos - i0)
+  }
+  return out
+}
+
+/** 把识别文本注入对话输入框（受控组件：原生 value setter + input 事件）。 */
+function injectIntoComposer(text: string): boolean {
+  const ta = document.querySelector<HTMLTextAreaElement>('[data-composer-card] textarea[data-phase]')
+  if (!ta || ta.disabled || ta.readOnly) return false
+  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+  if (!setter) return false
+  setter.call(ta, text)
+  ta.dispatchEvent(new Event('input', { bubbles: true }))
+  ta.focus()
+  return true
+}
+
 /**
  * The floating pet body. Pure presentational: reads the snapshot, plays the
  * right segmented sequence, and handles local interactions (drag, hover,
- * wander, fish snack).
+ * wander, fish snack, tap-to-talk voice input).
  */
 export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjected): ReturnType<typeof createPortal> {
   const hostTrack: BlubbyTrack = snapshot?.track ?? 'idle'
@@ -156,14 +182,101 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // Current swim direction as an angle in radians: 0 → right (source facing),
   // π → left (mirrored). Vertical tilt stays within ±SWIM_MAX_TILT.
   const swimAngle = useRef(0)
+  // ---- tap-to-talk voice input: tap the pet to record, tap again to stop.
+  // The recognized text is injected into the conversation composer. ----
+  const [recording, setRecording] = useState(false)
+  const [recError, setRecError] = useState<string | null>(null)
+  const mediaRef = useRef<{
+    stream: MediaStream
+    ctx: AudioContext
+    source: MediaStreamAudioSourceNode
+    processor: ScriptProcessorNode
+    chunks: Int16Array[]
+  } | null>(null)
+  const recTimeoutRef = useRef<number | undefined>(undefined)
+  // Pointer-down snapshot, to tell a tap (→ voice input) from a drag.
+  const downRef = useRef<{ x: number; y: number; t: number } | null>(null)
+
+  /** 开始录音：麦克风 → PCM 16k/mono/16bit 攒字节，20s 自动停止。 */
+  async function startRecording(): Promise<void> {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      const ctx = new AudioContext({ sampleRate: 16000 })
+      await ctx.resume()
+      const source = ctx.createMediaStreamSource(stream)
+      const processor = ctx.createScriptProcessor(4096, 1, 1)
+      const chunks: Int16Array[] = []
+      processor.onaudioprocess = (e: AudioProcessingEvent): void => {
+        const data = resampleTo16k(e.inputBuffer.getChannelData(0), ctx.sampleRate)
+        const samples = new Int16Array(data.length)
+        for (let i = 0; i < data.length; i += 1) {
+          const s = Math.max(-1, Math.min(1, data[i] ?? 0))
+          samples[i] = s < 0 ? s * 0x8000 : s * 0x7fff
+        }
+        chunks.push(samples)
+      }
+      source.connect(processor)
+      processor.connect(ctx.destination)
+      mediaRef.current = { stream, ctx, source, processor, chunks }
+      setRecording(true)
+      setRecError(null)
+      recTimeoutRef.current = window.setTimeout(() => { void stopRecording() }, 20000)
+    } catch {
+      setRecError('麦克风不可用')
+    }
+  }
+
+  /** 停止录音 → 上传 PCM → 服务端 ASR → 文本注入输入框。 */
+  async function stopRecording(): Promise<void> {
+    if (recTimeoutRef.current !== undefined) {
+      window.clearTimeout(recTimeoutRef.current)
+      recTimeoutRef.current = undefined
+    }
+    const rec = mediaRef.current
+    mediaRef.current = null
+    setRecording(false)
+    if (!rec) return
+    try {
+      rec.processor.disconnect()
+      rec.source.disconnect()
+      rec.stream.getTracks().forEach((track) => track.stop())
+      await rec.ctx.close()
+      let total = 0
+      for (const chunk of rec.chunks) total += chunk.length
+      if (total === 0) { setRecError('没听到声音'); return }
+      const merged = new Int16Array(total)
+      let offset = 0
+      for (const chunk of rec.chunks) { merged.set(chunk, offset); offset += chunk.length }
+      const pcm = new Uint8Array(merged.buffer)
+      const res = await fetch('/api/blubby/asr', {
+        method: 'POST',
+        headers: { 'content-type': 'application/octet-stream' },
+        body: pcm,
+      })
+      const data = await res.json() as { ok?: boolean; text?: string; error?: string }
+      if (!res.ok || data.ok === false) throw new Error(data.error ?? `识别失败(${res.status})`)
+      const text = (data.text ?? '').trim()
+      if (!text) { setRecError('没听清，再说一次'); return }
+      if (!injectIntoComposer(text)) setRecError('输入框当前不可用')
+    } catch (error) {
+      setRecError(error instanceof Error ? error.message : '识别失败')
+    }
+  }
+
+  /** 点一下 = 开/停录音（正在录就停，否则开）。 */
+  function toggleRecording(): void {
+    if (mediaRef.current !== null) void stopRecording()
+    else void startRecording()
+  }
 
   const track: BlubbyTrack = hovered && !dragging ? 'waiting' : settledIdle ? 'idle' : hostTrack
 
-  // ---- drag to anywhere ----
+  // ---- drag to anywhere + tap-to-talk ----
   const onPointerDown = (e: React.PointerEvent): void => {
     e.preventDefault()
     setDragging(true)
     setHovered(false)
+    downRef.current = { x: e.clientX, y: e.clientY, t: Date.now() }
     dragRef.current = { offsetX: e.clientX - pos.left, offsetY: e.clientY - pos.top }
   }
   useEffect(() => {
@@ -182,7 +295,14 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       else if (clamped.left > lastPosRef.current.left + 2) setFacingLeft(false)
       lastPosRef.current = clamped
     }
-    const onUp = (): void => {
+    const onUp = (e: PointerEvent): void => {
+      // A tap (press < 500ms, moved < 6px) toggles voice input; anything
+      // bigger was a drag.
+      const down = downRef.current
+      downRef.current = null
+      if (down && Date.now() - down.t < 500 && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 6) {
+        toggleRecording()
+      }
       setDragging(false)
       dragRef.current = null
     }
@@ -345,7 +465,22 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     if (frameIdx >= playlist.frames.length - 3) setSnacks([]) // mouth closed again
   }, [track, frameIdx, playlist, segments, snacks, snapshot])
 
-  const bubble = !hovered ? snapshot?.bubble : undefined
+  const bubble = recording ? '🎤 听你说…' : recError ?? (!hovered ? snapshot?.bubble : undefined)
+
+  // 识别错误气泡 5s 后自动消失。
+  useEffect(() => {
+    if (!recError) return
+    const timer = window.setTimeout(() => setRecError(null), 5000)
+    return () => window.clearTimeout(timer)
+  }, [recError])
+
+  // 组件卸载时停掉录音（释放麦克风）。
+  useEffect(() => () => {
+    const rec = mediaRef.current
+    if (!rec) return
+    rec.stream.getTracks().forEach((track) => track.stop())
+    void rec.ctx.close()
+  }, [])
 
   const float = (
     <div
