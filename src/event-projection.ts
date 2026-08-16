@@ -209,7 +209,8 @@ export function projectOfficialEvent(
       runtime.firstChunkAt = undefined
       runtime.stepSettledChat = runtime.food.chatTokens
       runtime.stepSettledTool = runtime.food.toolTokens
-      return { input: { phase: 'waiting', line: '等待模型响应' } }
+      // 不再进入 waiting「等待模型响应」：直接显示办公（打字）循环，与 Pwsh 阶段不区分。
+      return { input: { phase: 'thinking', line: '开始处理' } }
     case 'assistant/chunk': {
       const { chunk } = event.data
       if (runtime.firstChunkAt === undefined) runtime.firstChunkAt = Date.now()

@@ -45,6 +45,8 @@ export interface BlubbyInjected {
   transportFailed: boolean
   /** Segment manifest loaded from /blubby/segments.json. */
   segments: BlubbySegments | null
+  /** 切项目数据未刷新到位（面板显示转圈，等新会话数据就位）。 */
+  switching: boolean
   /** Hide the pet (host persists; client shows a summon button). */
   onHide: () => void
   /** Summon the hidden pet back. */
@@ -118,7 +120,12 @@ export interface BlubbyPlaylist {
  *   hold      : initial → enter → doing[0] (stop on the歪头 frame)
  *   one-shot  : initial → enter → doing×3 → exit (play once, hold last)
  */
-function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): BlubbyPlaylist | null {
+function buildPlaylist(
+  track: BlubbyTrack,
+  segments: BlubbySegments | null,
+  repeat = DOING_REPEAT,
+  skipExit = false,
+): BlubbyPlaylist | null {
   if (!segments) return null
   const state = segments.states[track]
   if (!state) return null
@@ -132,8 +139,8 @@ function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): Blu
     return { frames, doingStart: -1, doingEnd: -1 } // no movement while holding
   }
   const repeated: string[] = []
-  for (let i = 0; i < DOING_REPEAT; i += 1) repeated.push(...doing)
-  const frames = [...seg.initial, ...seg.enter, ...repeated, ...seg.exit]
+  for (let i = 0; i < repeat; i += 1) repeated.push(...doing)
+  const frames = [...seg.initial, ...seg.enter, ...repeated, ...(skipExit ? [] : seg.exit)]
   return {
     frames,
     doingStart: seg.initial.length + seg.enter.length,
@@ -200,7 +207,7 @@ function SatietyRing({ percent }: { percent: number | null }): JSX.Element {
  * right segmented sequence, and handles local interactions (drag, hover,
  * wander, fish snack, tap-to-open stats panel, satiety burp).
  */
-export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSummon }: BlubbyInjected): ReturnType<typeof createPortal> {
+export function BlubbyEntry({ snapshot, transportFailed, segments, switching, onHide, onSummon }: BlubbyInjected): ReturnType<typeof createPortal> {
   const hostTrack: BlubbyTrack = snapshot?.track ?? 'idle'
   // Local override: hover shows 疑惑脸 regardless of host activity.
   const [hovered, setHovered] = useState(false)
@@ -221,8 +228,10 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
   const [panelOpen, setPanelOpen] = useState(false)
   // "好撑" burp effect (satiety grew past the threshold).
   const [burping, setBurping] = useState(false)
-  // 抽他特效：被扇巴掌（抖动 + 巴掌印 + 气泡）。
+  // 抽他特效：被扇巴掌（播放 failed「挨扇」素材动画 + 巴掌印 + 气泡）。
   const [slapped, setSlapped] = useState(false)
+  // 抽他动画覆盖：强制切到 failed track 播挨扇素材，播完回原 track。
+  const [slapping, setSlapping] = useState(false)
   // 本地隐藏（乐观更新：点了立即消失，不等下一次 poll）。
   const [localHidden, setLocalHidden] = useState(false)
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
@@ -237,7 +246,13 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
   const hidden = localHidden || snapshot?.hidden === true
   const git = snapshot?.git
 
-  const track: BlubbyTrack = hovered && !dragging ? 'waiting' : settledIdle ? 'idle' : hostTrack
+  const track: BlubbyTrack = slapping
+    ? 'failed' // 抽他：强制播放挨扇素材动画
+    : hovered && !dragging
+      ? 'waiting'
+      : settledIdle && (hostTrack === 'done' || hostTrack === 'failed')
+        ? 'idle'
+        : hostTrack
 
   // ---- drag to anywhere in the lower half + tap to open the stats panel ----
   const onPointerDown = (e: React.PointerEvent): void => {
@@ -302,28 +317,51 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
     prevSatietyRef.current = satietyPercent
   }, [satietyPercent])
 
-  // ---- 抽他：面板按钮触发，抖动 + 巴掌印 + 气泡 3s ----
+  // ---- 抽他：面板按钮触发，播放 failed「挨扇」素材动画 + 巴掌印 + 气泡 ----
+  // 动画 = initial+enter+doing×1（30 帧 ×125ms ≈ 3.75s），播完 hold 末尾帧，
+  // 4s 定时清除 slapping 后回原 track（hostTrack / idle）。
   const slapTimer = useRef<number | undefined>(undefined)
+  const slapAnimTimer = useRef<number | undefined>(undefined)
   const onSlap = (): void => {
     setSlapped(true)
+    setSlapping(true)
     setPanelOpen(false)
     if (slapTimer.current !== undefined) window.clearTimeout(slapTimer.current)
     slapTimer.current = window.setTimeout(() => setSlapped(false), 3000)
+    if (slapAnimTimer.current !== undefined) window.clearTimeout(slapAnimTimer.current)
+    slapAnimTimer.current = window.setTimeout(() => setSlapping(false), 4200)
   }
   useEffect(() => () => {
     if (slapTimer.current !== undefined) window.clearTimeout(slapTimer.current)
+    if (slapAnimTimer.current !== undefined) window.clearTimeout(slapAnimTimer.current)
   }, [])
 
-  // Park at the desk spot while 办公/完成 (and clear any swim timers).
+  // Park beside the chat input box while 办公/完成: anchor to the composer's
+  // right edge (fallback: bottom-right corner). Also re-park on resize.
   useEffect(() => {
-    if (track === 'running' || track === 'done') {
-      const desk = {
-        left: window.innerWidth - PET_SIZE - DESK_RIGHT,
-        top: window.innerHeight - PET_SIZE - DESK_BOTTOM,
-      }
+    if (track !== 'running' && track !== 'done') return
+    const parkAtDesk = (): void => {
+      const seat = document.querySelector<HTMLElement>('[data-composer-seat]')
+      const box = seat?.querySelector<HTMLTextAreaElement>('textarea') ?? seat
+      const desk = box
+        ? (() => {
+            const r = box.getBoundingClientRect()
+            return {
+              // 输入框右侧边上：右缘 +12px，宠物底边与输入框底边对齐。
+              left: Math.max(8, Math.min(window.innerWidth - PET_SIZE - 8, r.right + 12)),
+              top: Math.max(Math.round(window.innerHeight * SWIM_AREA_TOP_RATIO), r.bottom - PET_SIZE),
+            }
+          })()
+        : {
+            left: window.innerWidth - PET_SIZE - DESK_RIGHT,
+            top: window.innerHeight - PET_SIZE - DESK_BOTTOM,
+          }
       setPos(desk)
       lastPosRef.current = desk
     }
+    parkAtDesk()
+    window.addEventListener('resize', parkAtDesk)
+    return () => window.removeEventListener('resize', parkAtDesk)
   }, [track])
 
   // Reset the local settled flag when the host reports a fresh one-shot.
@@ -332,9 +370,21 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
   }, [hostTrack])
 
   // ---- segmented frame player ----
-  const playlist = useMemo(() => buildPlaylist(track, segments), [track, segments])
+  const playlist = useMemo(
+    () => buildPlaylist(track, segments, slapping ? 1 : DOING_REPEAT, slapping),
+    [track, segments, slapping],
+  )
   const [frameIdx, setFrameIdx] = useState(0)
   const frameMs = segments?.frameMs ?? 125
+
+  // k11（最大张嘴帧）在 playlist 中的 index：initial 后 enter 段的最后一帧。
+  const k11Index = useMemo(() => {
+    if (!segments) return -1
+    const doneSegs = segments.states.done.segments
+    return doneSegs.initial.length + doneSegs.enter.length - 1
+  }, [segments])
+  // 所有食物投放完成的时间戳：最后一个 snack 的 delay + 掉落动画 0.7s。
+  const snacksDoneAtRef = useRef(0)
 
   // Preload the whole playlist so frame switches never flash white.
   useEffect(() => {
@@ -355,6 +405,10 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
     if (!playlist) return
     const timer = window.setInterval(() => {
       setFrameIdx((idx) => {
+        // 喂食暂停：done 停在 k11（最大张嘴）帧，等所有食物投放完再继续。
+        if (track === 'done' && idx === k11Index && Date.now() < snacksDoneAtRef.current) {
+          return idx // hold at k11
+        }
         const next = idx + 1
         if (next < playlist.frames.length) return next
         // End of playlist:
@@ -364,7 +418,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
       })
     }, frameMs)
     return () => window.clearInterval(timer)
-  }, [playlist, track, frameMs])
+  }, [playlist, track, frameMs, k11Index])
 
   // One-shot finished (we're holding the final frame): settle locally.
   useEffect(() => {
@@ -450,19 +504,19 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
       : 0
   useEffect(() => {
     if (track !== 'done' || !playlist) return
-    // The open-mouth frame is the 3rd frame of the enter segment: find its
-    // index in the playlist (after initial).
-    const enterStart = segments?.states.done.segments.initial.length ?? 5
-    if (frameIdx === enterStart + 2 && snacks.length === 0) {
+    // k11（最大张嘴）帧：在这里投放全部食物，然后停在 k11 等食物全部
+    // 落完（最后一个 snack 的 delay + 掉落动画时长）再继续播后续帧。
+    if (frameIdx === k11Index && snacks.length === 0) {
       const tokens = snapshot?.tokens ?? 0
       // 1 snack per 1500 output tokens, 1..5 total.
       const count = Math.min(5, Math.max(1, Math.ceil(tokens / 1500)))
       setSnacks(Array.from({ length: count }, (_, i) => ({ id: i, delayMs: i * 180 })))
+      snacksDoneAtRef.current = Date.now() + (count - 1) * 180 + 700
     }
     if (frameIdx >= playlist.frames.length - 3) setSnacks([]) // mouth closed again
-  }, [track, frameIdx, playlist, segments, snacks, snapshot])
+  }, [track, frameIdx, playlist, segments, k11Index, snacks, snapshot])
 
-  const bubble = slapped ? '呜哇！！为什么打我…' : burping ? '好撑…吃不下啦' : (!hovered ? snapshot?.bubble : undefined)
+  const bubble = slapped ? '你这吃白饭的大肥鱼！' : burping ? '好撑…吃不下啦' : (!hovered ? snapshot?.bubble : undefined)
 
   // ---- stats strip: satiety ring · cost · efficiency · git (常驻) ----
   const satiety = snapshot?.satiety
@@ -512,6 +566,10 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
   // ---- stats panel: tap the pet to open ----
   const panel = panelOpen ? (
     <div
+      // 面板在 float 容器内：阻止 pointerdown 冒泡，否则 float 的拖拽
+      // onPointerDown（preventDefault）会吞掉面板按钮的 click 事件
+      // （抽他/隐藏点了没反应）。
+      onPointerDown={(e) => e.stopPropagation()}
       style={{
         position: 'absolute',
         bottom: 'calc(100% + 30px)',
@@ -535,31 +593,51 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
         <span style={{ fontWeight: 600, fontSize: 13 }}>小咕噜 · 本次运行</span>
         <span style={{ opacity: 0.5, fontSize: 11, cursor: 'pointer' }} onClick={() => setPanelOpen(false)}>✕</span>
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <SatietyRing percent={satiety?.percent ?? null} />
-        <span>
-          饱腹度 {formatSatietyPercent(satiety?.percent, satiety?.usedTokens)}
-          {satiety !== null && satiety !== undefined && (
-            <span style={{ opacity: 0.55 }}> · 上下文 {formatTokens(satiety.usedTokens)} / {formatTokens(satiety.contextWindow)}</span>
-          )}
-        </span>
-      </div>
-      <div style={{ marginTop: 6, opacity: 0.85 }}>
-        系统提示词 {formatTokens(food?.systemTokens ?? 0)} · 工具 {formatTokens(food?.toolTokens ?? 0)} · 对话消息 {formatTokens(food?.chatTokens ?? 0)}
-      </div>
-      <div style={{ opacity: 0.85 }}>⚡ 工作效率 {efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}（缓存命中）</div>
-      <div style={{ opacity: 0.85 }}>💰 花费 {formatCost(cost)}（官方一口价）</div>
-      {stats !== undefined && (
-        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', opacity: 0.85 }}>
-          <div>
-            ⏱ LLM {formatDuration(stats.llmMs)}
-            {stats.toolMs > 0 && <> · 工具 {formatDuration(stats.toolMs)}</>}
-          </div>
-          <div>
-            🚀 首 token {stats.ttftSteps > 0 ? formatDuration(stats.ttftMs / stats.ttftSteps) : '--'}
-            {stats.tokensPerSec !== null && <> · {stats.tokensPerSec} tok/s</>}
-          </div>
+      {switching ? (
+        // 切项目：数据未刷新到位前先转圈，到位后展示新会话数据。
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '20px 0', opacity: 0.9 }}>
+          <span
+            style={{
+              display: 'inline-block',
+              width: 13,
+              height: 13,
+              border: '2px solid rgba(255,255,255,0.25)',
+              borderTopColor: '#4bd6c8',
+              borderRadius: '50%',
+              animation: 'dshBlubbySpin 0.8s linear infinite',
+            }}
+          />
+          <span>切换项目，刷新数据中…</span>
         </div>
+      ) : (
+        <>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+            <SatietyRing percent={satiety?.percent ?? null} />
+            <span>
+              饱腹度 {formatSatietyPercent(satiety?.percent, satiety?.usedTokens)}
+              {satiety !== null && satiety !== undefined && (
+                <span style={{ opacity: 0.55 }}> · 上下文 {formatTokens(satiety.usedTokens)} / {formatTokens(satiety.contextWindow)}</span>
+              )}
+            </span>
+          </div>
+          <div style={{ marginTop: 6, opacity: 0.85 }}>
+            系统提示词 {formatTokens(food?.systemTokens ?? 0)} · 工具 {formatTokens(food?.toolTokens ?? 0)} · 对话消息 {formatTokens(food?.chatTokens ?? 0)}
+          </div>
+          <div style={{ opacity: 0.85 }}>⚡ 工作效率 {efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}（缓存命中）</div>
+          <div style={{ opacity: 0.85 }}>💰 花费 {formatCost(cost)}（官方一口价）</div>
+          {stats !== undefined && (
+            <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', opacity: 0.85 }}>
+              <div>
+                ⏱ LLM {formatDuration(stats.llmMs)}
+                {stats.toolMs > 0 && <> · 工具 {formatDuration(stats.toolMs)}</>}
+              </div>
+              <div>
+                🚀 首 token {stats.ttftSteps > 0 ? formatDuration(stats.ttftMs / stats.ttftSteps) : '--'}
+                {stats.tokensPerSec !== null && <> · {stats.tokensPerSec} tok/s</>}
+              </div>
+            </div>
+          )}
+        </>
       )}
       {git !== null && git !== undefined && git.branch !== '' && (
         <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', opacity: 0.9 }}>
@@ -634,12 +712,9 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
             : 'left 1.2s ease-in-out, top 1.2s ease-in-out',
         userSelect: 'none',
         touchAction: 'none',
-        // 好撑打嗝：轻微上下抖动；抽他：快速左右甩。
-        animation: slapped
-          ? 'dshBlubbySlap 0.35s ease-in-out 5'
-          : burping
-            ? 'dshBlubbyBurp 0.5s ease-in-out 3'
-            : undefined,
+        // 好撑打嗝：轻微上下抖动；抽他动画由 failed 素材本身表现（不再 CSS 甩头，
+        // 避免 transform 动画与挨扇帧打架）。
+        animation: burping ? 'dshBlubbyBurp 0.5s ease-in-out 3' : undefined,
       }}
       onPointerDown={onPointerDown}
       onMouseEnter={() => { if (!dragging) setHovered(true) }}
@@ -658,22 +733,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
           background: 'transparent',
         }}
       />
-      {/* 巴掌印：被抽他时显示（CSS，无素材） */}
-      {slapped && (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            pointerEvents: 'none',
-            zIndex: 2,
-          }}
-        >
-          <div style={{ fontSize: 64, transform: 'rotate(-18deg)', animation: 'dshBlubbySlapMark 0.45s ease-out 1 forwards' }}>✋</div>
-        </div>
-      )}
+      {/* 挨扇反馈 = failed 素材动画本身 + 气泡；不再叠加 ✋ 覆盖层（碍事）。 */}
       {/* CSS-drawn fish snacks (done state), no asset — one per 1500 tokens */}
       {snacks.map((s) => (
         <div
@@ -723,18 +783,15 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, onHide, onSum
           25% { transform: translateY(-10px); }
           75% { transform: translateY(-4px); }
         }
+        @keyframes dshBlubbySpin {
+          to { transform: rotate(360deg); }
+        }
         @keyframes dshBlubbySlap {
           0%, 100% { transform: translateX(0) rotate(0deg); }
           20% { transform: translateX(-14px) rotate(-8deg); }
           40% { transform: translateX(12px) rotate(7deg); }
           60% { transform: translateX(-10px) rotate(-5deg); }
           80% { transform: translateX(8px) rotate(4deg); }
-        }
-        @keyframes dshBlubbySlapMark {
-          0% { opacity: 0; transform: rotate(-18deg) scale(2.2); }
-          30% { opacity: 1; transform: rotate(-18deg) scale(0.92); }
-          55% { transform: rotate(-18deg) scale(1.05); }
-          70%, 100% { opacity: 0.92; transform: rotate(-18deg) scale(1); }
         }
       `}</style>
       {bubble !== undefined && (

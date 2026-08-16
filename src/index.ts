@@ -55,6 +55,15 @@ export interface OfficialTokenUsage {
   cacheWriteTokens?: number
 }
 
+/** dsh-token-meter 的 tokenUsage 投影 view（整段日志累计四桶，与
+ * StatsLine 的 useProjection('tokenUsage') 同源；官方口径的命中率分子/分母）。 */
+export interface OfficialTokenUsageProjection {
+  uncachedInputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+}
+
 /** dsh-token-meter.measure() 返回形状（只读消费所需的最小面）。 */
 export interface OfficialTokenMeasurement {
   totalTokens: number
@@ -117,6 +126,8 @@ export interface BlubbyStateView {
   stateStartedAt: number
   /** Output tokens accumulated in the current turn (fish snack reward). */
   tokens?: number
+  /** 当前显示会话 id（null = 无会话）；前端用它判断切项目数据是否已刷新到位。 */
+  sessionId: string | null
   /** 养成统计（有活动会话时给出）：饱腹度/口粮/效率/花费/性能。 */
   satiety?: BlubbySessionStats['satiety']
   food?: BlubbySessionStats['food']
@@ -171,6 +182,8 @@ export class BlubbyService extends Service {
   private git: BlubbyGitView | null = null
   private gitAt = 0
   private gitFetching = false
+  /** git 缓存所属 cwd：切换项目（cwd 变）强制立即刷新，不走 30s 懒刷新窗口。 */
+  private gitCwd: string | undefined
 
   constructor(ctx: Context, config: BlubbyConfig = {}) {
     super(ctx, 'blubby')
@@ -238,6 +251,29 @@ export class BlubbyService extends Service {
     this.hidden = !visible
   }
 
+  /**
+   * 前端通知「当前会话已切换」（dsh web 会话列表 current 变化）：立即
+   * 把显示面切到新会话并强制刷新 git（切项目后 cwd 变化，不等 30s 懒
+   * 刷新窗口）。sessionId 为 undefined = 回到无会话页（显示归档累计）。
+   */
+  setCurrentSession(sessionId: string | undefined): void {
+    if (sessionId === undefined) {
+      this.displaySession = undefined
+      this.machine.onSessionDisposed()
+      this.gitCwd = undefined
+      this.gitAt = 0
+      this.git = null
+      return
+    }
+    const session = this.ctx.sessions?.get(sessionId as Session['header']['id'])
+    if (session === undefined) return
+    this.displaySession = session
+    this.machine.onSessionActive()
+    // 强制刷新 git：cwd 变化 → refreshGit 跳过 30s 窗口立即执行。
+    this.gitCwd = undefined
+    this.gitAt = 0
+  }
+
   /** 把一次会话的官方口径快照累加进全局归档。 */
   private archiveSession(session: Session): void {
     const official = this.official
@@ -253,14 +289,14 @@ export class BlubbyService extends Service {
     this.archived.steps += ss.steps
     const tm = official.tokenMeter.measure(session)
     this.archived.totalTokens += tm.totalTokens
-    const base = tm.baseline
-    if (base.kind === 'usage' && base.usage !== undefined) {
-      const u = base.usage
-      this.archived.cost += (u.cacheReadTokens ?? 0) * PRICE_CACHE_HIT / 1e6
-        + ((u.inputTokens ?? 0) + (u.cacheWriteTokens ?? 0)) * PRICE_UNCACHED / 1e6
-        + (u.outputTokens ?? 0) * PRICE_OUTPUT / 1e6
+    const usage = this.readTokenUsage(session)
+    if (usage !== null) {
+      // 官方累计投影口径（与 StatsLine 同源）：四桶 + 命中率分母。
+      this.archived.cost += usage.cacheReadTokens * PRICE_CACHE_HIT / 1e6
+        + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED / 1e6
+        + usage.outputTokens * PRICE_OUTPUT / 1e6
       const { chat, tool } = this.foodFromNodes(session, tm)
-      const billed = (u.inputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0)
+      const billed = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
       this.archived.chatTokens += chat
       this.archived.toolTokens += tool
       this.archived.systemTokens += Math.max(0, billed - chat - tool)
@@ -288,6 +324,21 @@ export class BlubbyService extends Service {
     }
   }
 
+  /** 官方 tokenUsage 投影（整段会话日志的累计四桶，与对话框底部 StatsLine 的
+   * useProjection('tokenUsage') 同源同口径）；缺失时返回 null。 */
+  private readTokenUsage(session: Session): OfficialTokenUsageProjection | null {
+    const official = this.official
+    if (official === undefined) return null
+    const values = official.sessionProjections.snapshot(session).values
+    const u = values.tokenUsage as OfficialTokenUsageProjection | undefined
+    if (u === undefined || typeof u !== 'object') return null
+    if (typeof u.uncachedInputTokens !== 'number'
+      || typeof u.outputTokens !== 'number'
+      || typeof u.cacheReadTokens !== 'number'
+      || typeof u.cacheWriteTokens !== 'number') return null
+    return u
+  }
+
   /** 按官方 tokenMeter 的 surface 节点把对话/工具 token 分类。 */
   private foodFromNodes(session: Session, tm: OfficialTokenMeasurement): { chat: number; tool: number } {
     let chat = 0
@@ -304,12 +355,20 @@ export class BlubbyService extends Service {
   /** git 快照：懒刷新（30s 节奏），返回当前缓存；无活动会话或无仓库为 null。 */
   private refreshGit(session: Session | undefined): void {
     if (session === undefined) {
-      if (Date.now() - this.gitAt > GIT_REFRESH_MS * 2) this.git = null
+      if (Date.now() - this.gitAt > GIT_REFRESH_MS * 2) {
+        this.git = null
+        this.gitCwd = undefined
+      }
       return
     }
-    if (this.gitFetching || Date.now() - this.gitAt < GIT_REFRESH_MS) return
+    if (this.gitFetching) return
     const cwd = session.header?.cwd
     if (typeof cwd !== 'string' || cwd === '') return
+    // 同 cwd 才走 30s 懒刷新窗口；切项目（cwd 变化，setCurrentSession
+    // 置空 gitCwd）立即刷新，不等窗口过期。
+    const cwdChanged = cwd !== this.gitCwd
+    if (!cwdChanged && Date.now() - this.gitAt < GIT_REFRESH_MS) return
+    this.gitCwd = cwd
     this.gitFetching = true
     const run = (argv: readonly string[]): Promise<string> => new Promise((resolve) => {
       execFile('git', [...argv], { cwd, timeout: 10_000, windowsHide: true }, (error, stdout) => {
@@ -391,19 +450,23 @@ export class BlubbyService extends Service {
           contextWindow: window_,
           percent: window_ > 0 ? Math.min(100, Math.round((tm.totalTokens / window_) * 100)) : 0,
         }
-        const base = tm.baseline
-        if (base.kind === 'usage' && base.usage !== undefined) {
-          const u = base.usage
-          const billed = (u.inputTokens ?? 0) + (u.cacheReadTokens ?? 0) + (u.cacheWriteTokens ?? 0)
-          cost += (u.cacheReadTokens ?? 0) * PRICE_CACHE_HIT / 1e6
-            + ((u.inputTokens ?? 0) + (u.cacheWriteTokens ?? 0)) * PRICE_UNCACHED / 1e6
-            + (u.outputTokens ?? 0) * PRICE_OUTPUT / 1e6
-          efficiency = billed > 0 ? Math.round(((u.cacheReadTokens ?? 0) / billed) * 100) : 100
+        const usage = this.readTokenUsage(active)
+        if (usage !== null) {
+          // 官方累计投影（StatsLine 同源）——整个会话日志的累计四桶，不是最近
+          // 一次请求。缓存命中率 = cacheRead / (uncached+cacheRead+cacheWrite)。
+          const billedInput = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+          cost += usage.cacheReadTokens * PRICE_CACHE_HIT / 1e6
+            + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED / 1e6
+            + usage.outputTokens * PRICE_OUTPUT / 1e6
+          // 官方 cacheHitPercent：分母为 0 时 null（不显示），不硬给 100。
+          efficiency = billedInput > 0
+            ? Math.round((usage.cacheReadTokens / billedInput) * 100)
+            : null
           const { chat, tool } = this.foodFromNodes(active, tm)
           food = {
             chatTokens: this.archived.chatTokens + chat,
             toolTokens: this.archived.toolTokens + tool,
-            systemTokens: this.archived.systemTokens + Math.max(0, billed - chat - tool),
+            systemTokens: this.archived.systemTokens + Math.max(0, billedInput - chat - tool),
           }
         } else {
           // 无 provider usage 锚点（估算口径）：花费按总量×未命中价近似。
@@ -447,6 +510,8 @@ export class BlubbyService extends Service {
       sessionActive: snapshot.sessionActive,
       stateStartedAt: snapshot.stateStartedAt,
       ...(snapshot.tokens === undefined ? {} : { tokens: snapshot.tokens }),
+      // 当前显示会话 id（前端用它判断切项目后的数据是否已刷新到位）。
+      sessionId: this.displaySession?.header.id ?? null,
       // 养成统计：官方口径（sessionStats + tokenMeter）+ 会话归档累计。
       satiety,
       food,
@@ -472,8 +537,9 @@ function num(value: unknown): number {
 /** Plugin name (the cordis roster id). */
 export const name = 'blubby'
 
-/** Required host services. */
-export const inject = ['webServer']
+/** Required host services: webServer（API/静态路由）; sessions（SessionStore，
+ * current-session 切换需按 id 解析服务端 Session 对象）。 */
+export const inject = ['webServer', 'sessions']
 
 /**
  * Plugin body: instantiate the pet service and register its API + asset

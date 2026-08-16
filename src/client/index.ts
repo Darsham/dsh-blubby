@@ -21,6 +21,7 @@ import { BlubbyEntry, type BlubbyInjected, type BlubbySegments } from './BlubbyE
 interface BlubbyHttpApi {
   state(): Promise<BlubbyStateView>
   setVisible(visible: boolean): Promise<{ ok: boolean }>
+  setCurrentSession(sessionId: string | undefined): Promise<{ ok: boolean }>
 }
 
 /** Same-origin JSON fetch helper. */
@@ -36,6 +37,7 @@ async function blubbyFetch<T>(path: string): Promise<T> {
 const blubbyApi: BlubbyHttpApi = {
   state: () => blubbyFetch('/api/blubby/state'),
   setVisible: (visible) => blubbyPost('/api/blubby/set-visible', { visible }) as Promise<{ ok: boolean }>,
+  setCurrentSession: (sessionId) => blubbyPost('/api/blubby/current-session', { sessionId }) as Promise<{ ok: boolean }>,
 }
 
 /** POST one JSON body to a blubby endpoint. */
@@ -54,8 +56,8 @@ async function blubbyPost(path: string, body: unknown): Promise<unknown> {
 /** Poll interval for the host snapshot. */
 const POLL_MS = 2000
 
-/** Required services (none — the pet is pure fetch + DOM). */
-export const inject: string[] = []
+/** Required services: the client sessions runtime (list.current = 当前会话). */
+export const inject: string[] = ['sessions']
 
 /**
  * Client plugin body: mount the global blubby entry and poll loop while the
@@ -77,10 +79,15 @@ export function apply(ctx: ClientContext): void {
   let latest: BlubbyStateView | null = null
   let failed = false
   let segments: BlubbySegments | null = null
+  // 切项目 loading：current 变化 → 通知服务端切面，期间转圈；直到 poll 到
+  // 的 sessionId 等于目标会话 id，说明新数据已就位，再展示。
+  let switching = false
+  let targetSessionId: string | undefined
   const pollNow = (): void => {
     blubbyApi.state().then((snapshot) => {
       latest = snapshot
       failed = false
+      if (switching && snapshot?.sessionId === targetSessionId) switching = false
       render()
     }, () => {
       failed = true
@@ -102,6 +109,8 @@ export function apply(ctx: ClientContext): void {
       snapshot: latest,
       transportFailed: failed,
       segments,
+      // 切项目时数据未刷新到位 → 面板显示转圈。
+      switching,
       onHide: () => {
         void blubbyApi.setVisible(false)
       },
@@ -144,6 +153,27 @@ export function apply(ctx: ClientContext): void {
       document.removeEventListener('visibilitychange', onVisibility)
     }
   }, 'blubby: poll')
+
+  ctx.effect(() => {
+    // 当前会话（= dsh web 侧边栏选中）变化 → 通知服务端立即切换统计面
+    // 并强制刷新 git。sessions.list 快照带 current（持久化选中），与官方
+    // 会话 UI 同一事实源：切项目/新建对话/回无会话页都会触发。
+    const sessions = ctx.get('sessions') as
+      | { list: { getSnapshot(): { current: string | undefined }; subscribe(fn: () => void): () => void } }
+      | undefined
+    let offList: (() => void) | undefined
+    if (sessions !== undefined) {
+      let currentId: string | undefined = sessions.list.getSnapshot().current
+      const onListChange = (): void => {
+        const next = sessions.list.getSnapshot().current
+        if (next === currentId) return
+        currentId = next
+        void blubbyApi.setCurrentSession(next)
+      }
+      offList = sessions.list.subscribe(onListChange)
+    }
+    return () => { if (offList !== undefined) offList() }
+  }, 'blubby: current session watch')
 
   ctx.effect(() => {
     return () => {

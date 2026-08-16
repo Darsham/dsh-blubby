@@ -137,6 +137,11 @@ export function makeBlubbyRoutes(deps: { service: BlubbyService; assetsDir: stri
       service.setVisible(body.visible === true)
       return Promise.resolve({ ok: true })
     }),
+    postRoute(BLUBBY_API_PREFIX + '/current-session', (body) => {
+      // 前端 dsh web 会话列表 current 变化 → 立即切显示面 + 强制刷新 git。
+      service.setCurrentSession(typeof body.sessionId === 'string' ? body.sessionId : undefined)
+      return Promise.resolve({ ok: true })
+    }),
   ]
 
   const assetRoute: WebRoute = {
