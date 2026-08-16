@@ -382,9 +382,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           height: '100%',
           objectFit: 'contain',
           display: 'block',
-          transform: facingLeft
-            ? `scaleX(-1) translateX(${frameOff}px)`
-            : `translateX(${-frameOff}px)`,
+          transform: `scaleX(${facingLeft ? -1 : 1}) translateX(${-frameOff}px)`,
           background: 'transparent',
         }}
       />
