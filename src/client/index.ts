@@ -73,7 +73,9 @@ export function apply(ctx: ClientContext): void {
     })
   }
   // Load the segment manifest once (independent of the state poll).
-  blubbyFetch<BlubbySegments>('/blubby/segments.json').then((manifest) => {
+  // Cache-bust with a timestamp: the manifest changes when segments are
+  // re-cut, and a stale browser cache made the pet play old frames.
+  blubbyFetch<BlubbySegments>('/blubby/segments.json?t=' + Date.now()).then((manifest) => {
     segments = manifest
     render()
   }, () => {

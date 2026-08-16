@@ -202,11 +202,14 @@ export function makeBlubbyRoutes(deps: { service: BlubbyService; assetsDir: stri
         res.end()
         return
       }
+      // The manifest is mutable (segments get re-cut as assets evolve) — do
+      // NOT cache it long-term, or the browser keeps playing old frames.
+      const isManifest = name === 'segments.json'
       readFile(file).then((body) => {
         res.writeHead(200, {
           'content-type': mimeFor(file),
           'content-length': String(body.byteLength),
-          'cache-control': 'public, max-age=86400',
+          'cache-control': isManifest ? 'no-cache' : 'public, max-age=86400',
         })
         if (req.method === 'HEAD') {
           res.end()
