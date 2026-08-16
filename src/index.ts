@@ -29,7 +29,7 @@ export interface BlubbyConfig {
 
 /** Snapshot returned by `blubby.state`. */
 export interface BlubbyStateView {
-  /** Which video track to play. */
+  /** Which track to play. */
   track: BlubbyStateSnapshot['track']
   /** Optional status bubble copy, shown while active. */
   bubble?: string
@@ -39,6 +39,8 @@ export interface BlubbyStateView {
   sessionActive: boolean
   /** Wall-clock ms this state started (client can sync loops). */
   stateStartedAt: number
+  /** Output tokens accumulated in the current turn (fish snack reward). */
+  tokens?: number
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -133,6 +135,7 @@ export class BlubbyService extends Service {
       phase: snapshot.phase,
       sessionActive: snapshot.sessionActive,
       stateStartedAt: snapshot.stateStartedAt,
+      ...(snapshot.tokens === undefined ? {} : { tokens: snapshot.tokens }),
     }
   }
 }

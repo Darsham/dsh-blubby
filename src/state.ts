@@ -24,11 +24,13 @@ export interface BlubbyStateInput {
   phase: BlubbyPhase
   /** Human-readable status line (plain text). */
   line?: string
+  /** Output tokens accumulated in the current turn (fish snack reward). */
+  tokens?: number
 }
 
 /** Animation decision plus the copy the pet should show. */
 export interface BlubbyStateSnapshot {
-  /** Which video track to play. */
+  /** Which track to play. */
   track: BlubbyTrack
   /** Optional status bubble copy (line or phrase), shown while active. */
   bubble?: string
@@ -38,6 +40,8 @@ export interface BlubbyStateSnapshot {
   phase: BlubbyPhase
   /** True when there is an active session (pet mounted). */
   sessionActive: boolean
+  /** Output tokens accumulated in the current turn (fish snack reward). */
+  tokens?: number
 }
 
 /**
@@ -67,6 +71,7 @@ export function trackForPhase(phase: BlubbyPhase): BlubbyTrack {
 export class BlubbyStateMachine {
   private phase: BlubbyPhase = 'idle'
   private line: string | undefined
+  private tokens: number | undefined
   private sessionActive = false
   private enteredAt: number | undefined
 
@@ -78,6 +83,7 @@ export class BlubbyStateMachine {
   onActivityStatus(input: BlubbyStateInput): void {
     this.phase = input.phase
     this.line = input.line
+    this.tokens = input.tokens
     this.enteredAt = this.now()
   }
 
@@ -91,6 +97,7 @@ export class BlubbyStateMachine {
     this.sessionActive = false
     this.phase = 'idle'
     this.line = undefined
+    this.tokens = undefined
     this.enteredAt = undefined
   }
 
@@ -118,6 +125,7 @@ export class BlubbyStateMachine {
       stateStartedAt: nowMs,
       phase: this.phase,
       sessionActive: this.sessionActive,
+      ...(this.tokens === undefined ? {} : { tokens: this.tokens }),
     }
   }
 }

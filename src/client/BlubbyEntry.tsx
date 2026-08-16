@@ -60,14 +60,22 @@ const DESK_BOTTOM = 96
 /** Pet rendered size (source frames are 240x240; scale to a desktop pet). */
 const PET_SIZE = 220
 
-/** Random wander target within the lower half of the viewport. */
-function wanderTarget(): { left: number; top: number } {
-  const maxLeft = window.innerWidth - PET_SIZE - 16
-  const maxTop = window.innerHeight - PET_SIZE - 16
-  const left = Math.max(8, Math.min(maxLeft, 8 + Math.random() * Math.min(360, window.innerWidth * 0.32)))
-  const top = Math.max(Math.round(window.innerHeight * 0.55), Math.min(maxTop, window.innerHeight * 0.55 + Math.random() * Math.min(140, window.innerHeight * 0.18)))
-  return { left, top }
+/** Fixed spawn position (bottom area, never random — the pet must not jump
+ * before it starts swimming). */
+function initialPos(): { left: number; top: number } {
+  return {
+    left: Math.max(8, window.innerWidth - PET_SIZE - DESK_RIGHT - 120),
+    top: Math.max(Math.round(window.innerHeight * 0.6), window.innerHeight - PET_SIZE - DESK_BOTTOM),
+  }
 }
+
+/** Horizontal step range per wander move (px). */
+const WANDER_STEP_MIN = 120
+const WANDER_STEP_MAX = 260
+/** How long a swim direction is held before it may switch (ms). */
+const SWIM_DIR_HOLD_MS = 10000
+/** Chance to switch direction when the hold expires. */
+const SWIM_DIR_SWITCH_CHANCE = 0.35
 
 /**
  * Build the flat frame playlist for a track per its play mode:
@@ -104,15 +112,21 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // while the host still reports the track (poll lag); settle locally.
   const [settledIdle, setSettledIdle] = useState(false)
   // Wander position for idle swimming (left/top so dragging is direct).
-  const [pos, setPos] = useState(() => wanderTarget())
+  // Initial position is FIXED — never random, so the pet does not jump
+  // before it starts swimming.
+  const [pos, setPos] = useState(initialPos)
   const [dragging, setDragging] = useState(false)
   // Facing: source frames face right; mirror when moving/swimming left.
   const [facingLeft, setFacingLeft] = useState(false)
-  // Fish snack drop state (done state, CSS-drawn — no asset).
-  const [snack, setSnack] = useState<{ left: number; top: number } | null>(null)
+  // Fish snack drops (done state, CSS-drawn — no asset). Multiple snacks
+  // when the turn consumed more output tokens.
+  const [snacks, setSnacks] = useState<{ id: number; delayMs: number }[]>([])
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const lastPosRef = useRef(pos)
   const wanderTimer = useRef<number | undefined>(undefined)
+  const dirTimer = useRef<number | undefined>(undefined)
+  // Current swim direction: +1 right (source facing) / -1 left (mirrored).
+  const swimDir = useRef<1 | -1>(1)
 
   const track: BlubbyTrack = hovered && !dragging ? 'waiting' : settledIdle ? 'idle' : hostTrack
 
@@ -151,36 +165,75 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     }
   }, [dragging])
 
-  // Idle swimming: wander the lower half every few seconds; face the move.
+  // Idle swimming: swim CONTINUOUSLY in the current direction, holding the
+  // direction for SWIM_DIR_HOLD_MS before it may switch. Moving left mirrors
+  // the pet (facingLeft). The position changes by a fixed step per move, so
+  // the pet never teleports — only the direction can change.
   useEffect(() => {
-    if (track === 'idle' && !dragging) {
-      const move = (): void => {
-        const target = wanderTarget()
-        setPos((current) => {
-          setFacingLeft(target.left < current.left - 2)
-          lastPosRef.current = target
-          return target
-        })
-        wanderTimer.current = window.setTimeout(move, 3500)
-      }
-      wanderTimer.current = window.setTimeout(move, 2500)
-      return () => {
-        if (wanderTimer.current !== undefined) window.clearTimeout(wanderTimer.current)
+    if (track !== 'idle' || dragging) {
+      if (wanderTimer.current !== undefined) {
+        window.clearTimeout(wanderTimer.current)
         wanderTimer.current = undefined
       }
-    }
-    if (wanderTimer.current !== undefined) {
-      window.clearTimeout(wanderTimer.current)
-      wanderTimer.current = undefined
-    }
-    // 办公/完成: park at the desk spot.
-    if (track === 'running' || track === 'done') {
-      const desk = {
-        left: window.innerWidth - PET_SIZE - DESK_RIGHT,
-        top: window.innerHeight - PET_SIZE - DESK_BOTTOM,
+      if (dirTimer.current !== undefined) {
+        window.clearTimeout(dirTimer.current)
+        dirTimer.current = undefined
       }
-      setPos(desk)
-      lastPosRef.current = desk
+      // 办公/完成: park at the desk spot.
+      if (track === 'running' || track === 'done') {
+        const desk = {
+          left: window.innerWidth - PET_SIZE - DESK_RIGHT,
+          top: window.innerHeight - PET_SIZE - DESK_BOTTOM,
+        }
+        setPos(desk)
+        lastPosRef.current = desk
+      }
+      return
+    }
+
+    const maxLeft = window.innerWidth - PET_SIZE - 8
+    const minLeft = 8
+    const maxTop = window.innerHeight - PET_SIZE - 8
+    const minTop = Math.round(window.innerHeight * 0.55)
+
+    const swim = (): void => {
+      setPos((current) => {
+        let dir = swimDir.current
+        const step = WANDER_STEP_MIN + Math.random() * (WANDER_STEP_MAX - WANDER_STEP_MIN)
+        let nextLeft = current.left + dir * step
+        // Bounce off the edges: force direction back inward.
+        if (nextLeft < minLeft) {
+          nextLeft = minLeft + Math.random() * 60
+          dir = 1
+        } else if (nextLeft > maxLeft) {
+          nextLeft = maxLeft - Math.random() * 60
+          dir = -1
+        }
+        if (dir !== swimDir.current) swimDir.current = dir
+        // Vertical: stay within the lower band, small jitter.
+        const nextTop = Math.min(maxTop, Math.max(minTop, minTop + Math.random() * Math.min(140, window.innerHeight * 0.18)))
+        setFacingLeft(dir === -1)
+        lastPosRef.current = { left: nextLeft, top: nextTop }
+        return { left: nextLeft, top: nextTop }
+      })
+      wanderTimer.current = window.setTimeout(swim, 3500)
+    }
+
+    const maybeSwitchDir = (): void => {
+      // After the hold, maybe turn around (keeps the pet from zig-zagging).
+      if (Math.random() < SWIM_DIR_SWITCH_CHANCE) {
+        swimDir.current = (swimDir.current === 1 ? -1 : 1)
+      }
+      dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
+    }
+
+    wanderTimer.current = window.setTimeout(swim, 2500)
+    dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
+    return () => {
+      if (wanderTimer.current !== undefined) window.clearTimeout(wanderTimer.current)
+      if (dirTimer.current !== undefined) window.clearTimeout(dirTimer.current)
+      wanderTimer.current = undefined
+      dirTimer.current = undefined
     }
   }, [track, dragging])
 
@@ -231,19 +284,23 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     }
   }, [track, playlist, frameIdx])
 
-  // Fish snack: when the done track plays the open-mouth frame, drop a
-  // CSS-drawn snack from above into the mouth (~48% height, 50% width).
+  // Fish snacks: when the done track plays the open-mouth frame, drop
+  // CSS-drawn snacks from above into the mouth (~48% height, 50% width).
+  // The count scales with the turn's output tokens (more tokens → more food).
   const frameUrl = playlist ? `/blubby/frames/${playlist[frameIdx]}` : null
   useEffect(() => {
     if (track !== 'done' || !playlist) return
     // The open-mouth frame is the 3rd frame of the enter segment: find its
     // index in the playlist (after initial).
     const enterStart = segments?.states.done.segments.initial.length ?? 5
-    if (frameIdx === enterStart + 2 && !snack) {
-      setSnack({ left: 50, top: 48 })
+    if (frameIdx === enterStart + 2 && snacks.length === 0) {
+      const tokens = snapshot?.tokens ?? 0
+      // 1 snack per 1500 output tokens, 1..5 total.
+      const count = Math.min(5, Math.max(1, Math.ceil(tokens / 1500)))
+      setSnacks(Array.from({ length: count }, (_, i) => ({ id: i, delayMs: i * 180 })))
     }
-    if (frameIdx >= playlist.length - 3) setSnack(null) // mouth closed again
-  }, [track, frameIdx, playlist, segments, snack])
+    if (frameIdx >= playlist.length - 3) setSnacks([]) // mouth closed again
+  }, [track, frameIdx, playlist, segments, snacks, snapshot])
 
   const bubble = !hovered ? snapshot?.bubble : undefined
 
@@ -280,18 +337,20 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           background: 'transparent',
         }}
       />
-      {/* CSS-drawn fish snack (done state), no asset */}
-      {snack && track === 'done' && (
+      {/* CSS-drawn fish snacks (done state), no asset — one per 1500 tokens */}
+      {snacks.map((s) => (
         <div
+          key={s.id}
           style={{
             position: 'absolute',
-            left: `${snack.left}%`,
+            left: '50%',
             top: '-14%',
             width: 30,
             height: 16,
             transform: 'translateX(-50%)',
             zIndex: -1,
-            animation: 'dshBlubbySnackDrop 0.7s ease-in forwards',
+            opacity: 0,
+            animation: `dshBlubbySnackDrop 0.7s ease-in ${s.delayMs}ms forwards`,
           }}
         >
           <div
@@ -316,7 +375,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
             }}
           />
         </div>
-      )}
+      ))}
       <style>{`
         @keyframes dshBlubbySnackDrop {
           from { top: -14%; transform: translateX(-50%) rotate(0deg); opacity: 1; }

@@ -13,6 +13,8 @@ import type { BlubbyStateInput } from './state.ts'
 export interface ProjectionRuntime {
   activeTools: Set<string>
   stepHadFailure: boolean
+  /** Output tokens accumulated in the current turn (drives the fish snack). */
+  turnTokens: number
 }
 
 /** One official event projection. */
@@ -22,7 +24,7 @@ export interface BlubbyActivityTransition {
 
 /** Fresh projection runtime for a newly seen session. */
 export function emptyProjectionRuntime(): ProjectionRuntime {
-  return { activeTools: new Set(), stepHadFailure: false }
+  return { activeTools: new Set(), stepHadFailure: false, turnTokens: 0 }
 }
 
 /** Keep tool names readable inside the compact status bubble. */
@@ -43,7 +45,8 @@ export function projectOfficialEvent(
     case 'turn/start':
       runtime.activeTools.clear()
       runtime.stepHadFailure = false
-      return { input: { phase: 'waiting', line: '准备开始' } }
+      runtime.turnTokens = 0
+      return { input: { phase: 'waiting', line: '准备开始', tokens: 0 } }
     case 'step/start':
       runtime.activeTools.clear()
       runtime.stepHadFailure = false
@@ -58,8 +61,14 @@ export function projectOfficialEvent(
       }
       return undefined
     }
-    case 'assistant/message':
-      return { input: { phase: 'review', line: '整理回复中' } }
+    case 'assistant/message': {
+      // Accumulate output tokens for the current turn (fish snack reward).
+      const usage = event.data.usage
+      if (usage !== undefined && Number.isFinite(usage.outputTokens) && usage.outputTokens > 0) {
+        runtime.turnTokens += usage.outputTokens
+      }
+      return { input: { phase: 'review', line: '整理回复中', tokens: runtime.turnTokens } }
+    }
     case 'tool/call':
       runtime.activeTools.add(String(event.data.callId))
       return {
