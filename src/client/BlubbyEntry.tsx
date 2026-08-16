@@ -4,7 +4,8 @@
  * keyframe sequences (transparent webp, no mp4): each state is split into
  * initial → enter → doing → exit segments, and the playback mode per track
  * decides what loops:
- *   - idle    (游泳): full playlist loop (initial→enter→doing×3→exit→…)
+ *   - idle    (游泳): loop the doing (划水) segment forever — the pet swims
+ *                      continuously, position moves only during doing frames
  *   - waiting (疑惑): play initial+enter once, then HOLD the歪头 doing frame
  *   - running (办公): loop ONLY the doing (敲键盘) segment — no 思考 transition
  *   - done    (吃饱): one-shot, fish snack drops into the open mouth (CSS-drawn)
@@ -43,7 +44,7 @@ type PlayMode = 'loop-full' | 'loop-doing' | 'hold' | 'one-shot'
 
 /** Which mode each track uses. */
 const PLAY_MODES: Record<BlubbyTrack, PlayMode> = {
-  idle: 'loop-full',     // 游泳：完整循环
+  idle: 'loop-doing',    // 游泳：一直游（只循环划水 doing，位置持续移动）
   waiting: 'hold',       // 疑惑：保持歪头不动
   running: 'loop-doing', // 办公：只循环敲键盘
   done: 'one-shot',      // 吃饱：一次性
@@ -69,13 +70,25 @@ function initialPos(): { left: number; top: number } {
   }
 }
 
-/** Horizontal step range per wander move (px). */
-const WANDER_STEP_MIN = 120
-const WANDER_STEP_MAX = 260
+/** Step distance per doing frame (px) — constant speed in ANY direction
+ * (left/right/up/down/diagonals all move the same distance per frame). */
+const SWIM_STEP_PX = 3
 /** How long a swim direction is held before it may switch (ms). */
 const SWIM_DIR_HOLD_MS = 10000
 /** Chance to switch direction when the hold expires. */
 const SWIM_DIR_SWITCH_CHANCE = 0.35
+/** Max vertical angle off horizontal (radians) — slight up/down drift. */
+const SWIM_MAX_TILT = Math.PI / 7
+
+/** A built playlist: flat frames plus the doing segment's index range
+ * (the only frames during which the pet may move while swimming). */
+export interface BlubbyPlaylist {
+  frames: string[]
+  /** First index of the doing segment (inclusive). */
+  doingStart: number
+  /** One past the last doing index (exclusive). */
+  doingEnd: number
+}
 
 /**
  * Build the flat frame playlist for a track per its play mode:
@@ -84,19 +97,27 @@ const SWIM_DIR_SWITCH_CHANCE = 0.35
  *   hold      : initial → enter → doing[0] (stop on the歪头 frame)
  *   one-shot  : initial → enter → doing×3 → exit (play once, hold last)
  */
-function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): string[] | null {
+function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): BlubbyPlaylist | null {
   if (!segments) return null
   const state = segments.states[track]
   if (!state) return null
   const seg = state.segments
   const doing = seg.doing
   const mode = PLAY_MODES[track]
-  if (mode === 'loop-doing') return [...doing]
+  if (mode === 'loop-doing') return { frames: [...doing], doingStart: 0, doingEnd: doing.length }
   const holdFrame = doing[0]
-  if (mode === 'hold') return [...seg.initial, ...seg.enter, ...(holdFrame ? [holdFrame] : [])]
+  if (mode === 'hold') {
+    const frames = [...seg.initial, ...seg.enter, ...(holdFrame ? [holdFrame] : [])]
+    return { frames, doingStart: -1, doingEnd: -1 } // no movement while holding
+  }
   const repeated: string[] = []
   for (let i = 0; i < DOING_REPEAT; i += 1) repeated.push(...doing)
-  return [...seg.initial, ...seg.enter, ...repeated, ...seg.exit]
+  const frames = [...seg.initial, ...seg.enter, ...repeated, ...seg.exit]
+  return {
+    frames,
+    doingStart: seg.initial.length + seg.enter.length,
+    doingEnd: seg.initial.length + seg.enter.length + repeated.length,
+  }
 }
 
 /**
@@ -116,6 +137,8 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // before it starts swimming.
   const [pos, setPos] = useState(initialPos)
   const [dragging, setDragging] = useState(false)
+  // True while the pet is actively swimming (doing frames move the position).
+  const [swimming, setSwimming] = useState(false)
   // Facing: source frames face right; mirror when moving/swimming left.
   const [facingLeft, setFacingLeft] = useState(false)
   // Fish snack drops (done state, CSS-drawn — no asset). Multiple snacks
@@ -123,10 +146,10 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   const [snacks, setSnacks] = useState<{ id: number; delayMs: number }[]>([])
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const lastPosRef = useRef(pos)
-  const wanderTimer = useRef<number | undefined>(undefined)
   const dirTimer = useRef<number | undefined>(undefined)
-  // Current swim direction: +1 right (source facing) / -1 left (mirrored).
-  const swimDir = useRef<1 | -1>(1)
+  // Current swim direction as an angle in radians: 0 → right (source facing),
+  // π → left (mirrored). Vertical tilt stays within ±SWIM_MAX_TILT.
+  const swimAngle = useRef(0)
 
   const track: BlubbyTrack = hovered && !dragging ? 'waiting' : settledIdle ? 'idle' : hostTrack
 
@@ -165,77 +188,17 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     }
   }, [dragging])
 
-  // Idle swimming: swim CONTINUOUSLY in the current direction, holding the
-  // direction for SWIM_DIR_HOLD_MS before it may switch. Moving left mirrors
-  // the pet (facingLeft). The position changes by a fixed step per move, so
-  // the pet never teleports — only the direction can change.
+  // Park at the desk spot while 办公/完成 (and clear any swim timers).
   useEffect(() => {
-    if (track !== 'idle' || dragging) {
-      if (wanderTimer.current !== undefined) {
-        window.clearTimeout(wanderTimer.current)
-        wanderTimer.current = undefined
+    if (track === 'running' || track === 'done') {
+      const desk = {
+        left: window.innerWidth - PET_SIZE - DESK_RIGHT,
+        top: window.innerHeight - PET_SIZE - DESK_BOTTOM,
       }
-      if (dirTimer.current !== undefined) {
-        window.clearTimeout(dirTimer.current)
-        dirTimer.current = undefined
-      }
-      // 办公/完成: park at the desk spot.
-      if (track === 'running' || track === 'done') {
-        const desk = {
-          left: window.innerWidth - PET_SIZE - DESK_RIGHT,
-          top: window.innerHeight - PET_SIZE - DESK_BOTTOM,
-        }
-        setPos(desk)
-        lastPosRef.current = desk
-      }
-      return
+      setPos(desk)
+      lastPosRef.current = desk
     }
-
-    const maxLeft = window.innerWidth - PET_SIZE - 8
-    const minLeft = 8
-    const maxTop = window.innerHeight - PET_SIZE - 8
-    const minTop = Math.round(window.innerHeight * 0.55)
-
-    const swim = (): void => {
-      setPos((current) => {
-        let dir = swimDir.current
-        const step = WANDER_STEP_MIN + Math.random() * (WANDER_STEP_MAX - WANDER_STEP_MIN)
-        let nextLeft = current.left + dir * step
-        // Bounce off the edges: force direction back inward.
-        if (nextLeft < minLeft) {
-          nextLeft = minLeft + Math.random() * 60
-          dir = 1
-        } else if (nextLeft > maxLeft) {
-          nextLeft = maxLeft - Math.random() * 60
-          dir = -1
-        }
-        if (dir !== swimDir.current) swimDir.current = dir
-        // Vertical: stay within the lower band, small jitter.
-        const nextTop = Math.min(maxTop, Math.max(minTop, minTop + Math.random() * Math.min(140, window.innerHeight * 0.18)))
-        setFacingLeft(dir === -1)
-        lastPosRef.current = { left: nextLeft, top: nextTop }
-        return { left: nextLeft, top: nextTop }
-      })
-      wanderTimer.current = window.setTimeout(swim, 3500)
-    }
-
-    const maybeSwitchDir = (): void => {
-      // After the hold, maybe turn around (keeps the pet from zig-zagging).
-      if (Math.random() < SWIM_DIR_SWITCH_CHANCE) {
-        swimDir.current = (swimDir.current === 1 ? -1 : 1)
-      }
-      dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
-    }
-
-    wanderTimer.current = window.setTimeout(swim, 2500)
-    dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
-    return () => {
-      if (wanderTimer.current !== undefined) window.clearTimeout(wanderTimer.current)
-      if (dirTimer.current !== undefined) window.clearTimeout(dirTimer.current)
-      wanderTimer.current = undefined
-      dirTimer.current = undefined
-    }
-  }, [track, dragging])
+  }, [track])
 
   // Reset the local settled flag when the host reports a fresh one-shot.
   useEffect(() => {
@@ -250,7 +213,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // Preload the whole playlist so frame switches never flash white.
   useEffect(() => {
     if (!playlist) return
-    for (const name of playlist) {
+    for (const name of playlist.frames) {
       const img = new Image()
       img.src = `/blubby/frames/${name}`
     }
@@ -267,7 +230,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     const timer = window.setInterval(() => {
       setFrameIdx((idx) => {
         const next = idx + 1
-        if (next < playlist.length) return next
+        if (next < playlist.frames.length) return next
         // End of playlist:
         if (track === 'waiting') return idx // hold the歪头 frame
         if (PLAY_MODES[track] === 'one-shot') return idx // hold last exit frame
@@ -279,15 +242,80 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
 
   // One-shot finished (we're holding the final frame): settle locally.
   useEffect(() => {
-    if (PLAY_MODES[track] === 'one-shot' && playlist && frameIdx === playlist.length - 1) {
+    if (PLAY_MODES[track] === 'one-shot' && playlist && frameIdx === playlist.frames.length - 1) {
       setSettledIdle(true)
     }
   }, [track, playlist, frameIdx])
 
+  // ---- swimming movement: ONLY during the doing frames ----
+  // Each doing frame moves the pet by SWIM_STEP_PX along swimAngle (constant
+  // speed in any direction). initial/enter/exit frames (dive in/out) keep the
+  // pet in place. Direction switches happen on SWIM_DIR_HOLD_MS.
+  const minLeft = 8
+  const maxLeft = () => window.innerWidth - PET_SIZE - 8
+  const minTop = Math.round((typeof window !== 'undefined' ? window.innerHeight : 800) * 0.55)
+  const maxTop = () => window.innerHeight - PET_SIZE - 8
+
+  useEffect(() => {
+    if (track !== 'idle' || dragging || !playlist) return
+    const inDoing = frameIdx >= playlist.doingStart && frameIdx < playlist.doingEnd
+    setSwimming(inDoing)
+    if (!inDoing) return
+    setPos((current) => {
+      let angle = swimAngle.current
+      let dx = Math.cos(angle) * SWIM_STEP_PX
+      let dy = Math.sin(angle) * SWIM_STEP_PX
+      let nextLeft = current.left + dx
+      let nextTop = current.top + dy
+      // Bounce off the edges: reflect the offending axis.
+      if (nextLeft < minLeft) {
+        nextLeft = minLeft
+        angle = Math.PI - angle
+      } else if (nextLeft > maxLeft()) {
+        nextLeft = maxLeft()
+        angle = Math.PI - angle
+      }
+      if (nextTop < minTop) {
+        nextTop = minTop
+        angle = -angle
+      } else if (nextTop > maxTop()) {
+        nextTop = maxTop()
+        angle = -angle
+      }
+      swimAngle.current = angle
+      setFacingLeft(Math.cos(angle) < -0.1)
+      lastPosRef.current = { left: nextLeft, top: nextTop }
+      return { left: nextLeft, top: nextTop }
+    })
+  }, [track, frameIdx, playlist, dragging])
+
+  // Clear swimming flag when leaving idle (e.g. hover → waiting, working).
+  useEffect(() => {
+    if (track !== 'idle' || dragging) setSwimming(false)
+  }, [track, dragging])
+
+  // Direction switch timer: after the hold, maybe turn around.
+  useEffect(() => {
+    if (track !== 'idle' || dragging) return
+    const maybeSwitchDir = (): void => {
+      if (Math.random() < SWIM_DIR_SWITCH_CHANCE) {
+        // Flip horizontal, keep a random vertical tilt within bounds.
+        const tilt = (Math.random() * 2 - 1) * SWIM_MAX_TILT
+        swimAngle.current = Math.cos(swimAngle.current) > 0 ? Math.PI + tilt : tilt
+      }
+      dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
+    }
+    dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
+    return () => {
+      if (dirTimer.current !== undefined) window.clearTimeout(dirTimer.current)
+      dirTimer.current = undefined
+    }
+  }, [track, dragging])
+
   // Fish snacks: when the done track plays the open-mouth frame, drop
   // CSS-drawn snacks from above into the mouth (~48% height, 50% width).
   // The count scales with the turn's output tokens (more tokens → more food).
-  const frameUrl = playlist ? `/blubby/frames/${playlist[frameIdx]}` : null
+  const frameUrl = playlist ? `/blubby/frames/${playlist.frames[frameIdx]}` : null
   useEffect(() => {
     if (track !== 'done' || !playlist) return
     // The open-mouth frame is the 3rd frame of the enter segment: find its
@@ -299,7 +327,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       const count = Math.min(5, Math.max(1, Math.ceil(tokens / 1500)))
       setSnacks(Array.from({ length: count }, (_, i) => ({ id: i, delayMs: i * 180 })))
     }
-    if (frameIdx >= playlist.length - 3) setSnacks([]) // mouth closed again
+    if (frameIdx >= playlist.frames.length - 3) setSnacks([]) // mouth closed again
   }, [track, frameIdx, playlist, segments, snacks, snapshot])
 
   const bubble = !hovered ? snapshot?.bubble : undefined
@@ -315,8 +343,14 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
         height: PET_SIZE,
         pointerEvents: 'auto',
         cursor: dragging ? 'grabbing' : 'grab',
-        // No position transition while dragging (must follow the mouse).
-        transition: dragging ? 'none' : 'left 1.2s ease-in-out, top 1.2s ease-in-out',
+        // While swimming the position updates every frame (125ms): a short
+        // linear transition keeps it smooth with no smear. Dragging and
+        // park-moves use the long ease for a gentle glide.
+        transition: dragging
+          ? 'none'
+          : swimming
+            ? 'left 125ms linear, top 125ms linear'
+            : 'left 1.2s ease-in-out, top 1.2s ease-in-out',
         userSelect: 'none',
         touchAction: 'none',
       }}
