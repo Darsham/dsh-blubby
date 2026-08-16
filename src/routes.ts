@@ -12,7 +12,6 @@ import { fileURLToPath } from 'node:url'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { WebRoute } from '@deepseek-ai/dsh-host-webserver'
 import type { BlubbyService } from './index.ts'
-import { AsrUnconfiguredError } from './asr.ts'
 
 /** Browser-facing base path of the blubby API routes. */
 export const BLUBBY_API_PREFIX = '/api/blubby'
@@ -129,52 +128,11 @@ function readJsonBody(req: IncomingMessage): Promise<unknown> {
   })
 }
 
-/** Read a raw request body (bounded at 4 MiB — one-shot ASR audio ≤ ~2 min). */
-function readRawBody(req: IncomingMessage, maxBytes = 4 * 1024 * 1024): Promise<Buffer> {
-  const chunks: Buffer[] = []
-  let size = 0
-  return new Promise((resolve, reject) => {
-    req.on('data', (chunk: Buffer) => {
-      size += chunk.byteLength
-      if (size > maxBytes) {
-        reject(new Error('body-too-large'))
-        req.destroy()
-        return
-      }
-      chunks.push(chunk)
-    })
-    req.on('end', () => resolve(Buffer.concat(chunks)))
-    req.on('error', reject)
-  })
-}
-
 /** Build the full route family (API + assets) for one service. */
 export function makeBlubbyRoutes(deps: { service: BlubbyService; assetsDir: string }): WebRoute[] {
   const { service, assetsDir } = deps
   const apiRoutes: WebRoute[] = [
     getRoute(BLUBBY_API_PREFIX + '/state', () => service.state()),
-    {
-      kind: 'exact',
-      path: BLUBBY_API_PREFIX + '/asr',
-      // 语音转文字代理：前端传 PCM 原始字节，服务端换 Token 调阿里云 NLS。
-      // 云 key 只存 harness 凭据层（~/.dsh/.credentials.yaml），本仓零密钥。
-      handler: (req: IncomingMessage, res: ServerResponse): void => {
-        if (!requireMethod(req, res, 'POST')) return
-        readRawBody(req).then((body) => {
-          service.asr(body).then(
-            (value) => json(res, 200, value),
-            (error) => {
-              json(res, error instanceof AsrUnconfiguredError ? 503 : 400, {
-                ok: false,
-                error: error instanceof Error ? error.message : String(error),
-              })
-            },
-          )
-        }, (error) => {
-          json(res, 400, { ok: false, error: error instanceof Error ? error.message : String(error) })
-        })
-      },
-    },
   ]
 
   const assetRoute: WebRoute = {

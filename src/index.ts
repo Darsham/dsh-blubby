@@ -11,6 +11,7 @@ import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   emptyProjectionRuntime,
   projectOfficialEvent,
+  type BlubbySessionStats,
   type ProjectionRuntime,
 } from './event-projection.ts'
 import {
@@ -20,7 +21,6 @@ import {
   type BlubbyStateSnapshot,
 } from './state.ts'
 import { blubbyAssetsDir, makeBlubbyRoutes } from './routes.ts'
-import { AliyunNlsAsr } from './asr.ts'
 
 /** Plugin configuration. */
 export interface BlubbyConfig {
@@ -42,6 +42,18 @@ export interface BlubbyStateView {
   stateStartedAt: number
   /** Output tokens accumulated in the current turn (fish snack reward). */
   tokens?: number
+  /** 养成统计（有活动会话时给出）：饱腹度/口粮/效率/花费/性能。 */
+  satiety?: BlubbySessionStats['satiety']
+  food?: BlubbySessionStats['food']
+  efficiency?: BlubbySessionStats['efficiency']
+  cost?: BlubbySessionStats['cost']
+  stats?: {
+    llmMs: number
+    toolMs: number
+    ttftMs: number
+    ttftSteps: number
+    tokensPerSec: number | null
+  }
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -55,13 +67,9 @@ declare module '@deepseek-ai/cordis' {
  * reads; event listeners update only in-memory state.
  */
 export class BlubbyService extends Service {
-  static inject: string[] = ['credentials']
-
   private readonly machine: BlubbyStateMachine
   private enabled: boolean
   private disposeActivity: (() => void) | undefined
-  /** 阿里云 NLS 一句话识别客户端（凭据走 ctx.credentials，本仓零密钥）。 */
-  private readonly nlsAsr: AliyunNlsAsr
   /** Session whose most recent meaningful event currently drives the pet. */
   private displaySession: Session | undefined
   private readonly sessionActivity = new WeakMap<Session, ProjectionRuntime>()
@@ -70,7 +78,6 @@ export class BlubbyService extends Service {
     super(ctx, 'blubby')
     this.machine = new BlubbyStateMachine()
     this.enabled = config.enabled ?? true
-    this.nlsAsr = new AliyunNlsAsr(ctx)
     this.syncActivity()
   }
 
@@ -82,12 +89,6 @@ export class BlubbyService extends Service {
   /** RPC: current pet state snapshot. */
   async state(): Promise<BlubbyStateView> {
     return this.view()
-  }
-
-  /** RPC: 一句话识别（PCM 16k/mono/16bit）→ 文本，供前端语音输入。 */
-  async asr(pcm: Buffer): Promise<{ text: string }> {
-    const text = await this.nlsAsr.recognize(pcm)
-    return { text }
   }
 
   /** Start or stop the session-activity listeners that drive the pet. */
@@ -139,6 +140,9 @@ export class BlubbyService extends Service {
 
   private view(): BlubbyStateView {
     const snapshot = this.machine.render()
+    const runtime = this.displaySession !== undefined
+      ? this.sessionActivity.get(this.displaySession)
+      : undefined
     return {
       track: snapshot.track,
       ...(snapshot.bubble === undefined ? {} : { bubble: snapshot.bubble }),
@@ -146,6 +150,20 @@ export class BlubbyService extends Service {
       sessionActive: snapshot.sessionActive,
       stateStartedAt: snapshot.stateStartedAt,
       ...(snapshot.tokens === undefined ? {} : { tokens: snapshot.tokens }),
+      // 养成统计：随活动会话给出（无会话时省略，前端走默认）。
+      ...(runtime === undefined ? {} : {
+        satiety: runtime.satiety,
+        food: runtime.food,
+        efficiency: runtime.efficiency,
+        cost: runtime.cost,
+        stats: {
+          llmMs: runtime.llmMs,
+          toolMs: runtime.toolMs,
+          ttftMs: runtime.ttftMs,
+          ttftSteps: runtime.ttftSteps,
+          tokensPerSec: runtime.tokensPerSec,
+        },
+      }),
     }
   }
 }
@@ -154,7 +172,7 @@ export class BlubbyService extends Service {
 export const name = 'blubby'
 
 /** Required host services. */
-export const inject = ['webServer', 'credentials']
+export const inject = ['webServer']
 
 /**
  * Plugin body: instantiate the pet service and register its API + asset

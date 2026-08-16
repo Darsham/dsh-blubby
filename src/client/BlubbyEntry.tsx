@@ -11,7 +11,9 @@
  *   - done    (吃饱): one-shot, fish snack drops into the open mouth (CSS-drawn)
  *   - failed  (挨扇): one-shot, settles back to idle
  * The pet faces the direction it swims: source frames face right, moving
- * left mirrors with scaleX(-1). It is draggable anywhere in the viewport.
+ * left mirrors with scaleX(-1). It is draggable within the lower half of the
+ * viewport, tap opens the feeding stats panel, and satiety > 85% with an
+ * increase triggers a "好撑" burp effect.
  * @module dsh-blubby/client/BlubbyEntry
  */
 
@@ -67,12 +69,21 @@ const DESK_BOTTOM = 96
 /** Pet rendered size (source frames are 240x240; scale to a desktop pet). */
 const PET_SIZE = 220
 
+/** 泳池/拖拽区域：只允许下半屏（top ≥ 屏高 × 此比例）。 */
+const SWIM_AREA_TOP_RATIO = 0.55
+
+/** 好撑阈值：饱腹度超过此百分比（且本次有增加）触发打嗝特效。 */
+const SATIETY_BURP_PERCENT = 85
+
+/** 好撑特效时长（ms）。 */
+const BURP_MS = 2600
+
 /** Fixed spawn position (bottom area, never random — the pet must not jump
  * before it starts swimming). */
 function initialPos(): { left: number; top: number } {
   return {
     left: Math.max(8, window.innerWidth - PET_SIZE - DESK_RIGHT - 120),
-    top: Math.max(Math.round(window.innerHeight * 0.6), window.innerHeight - PET_SIZE - DESK_BOTTOM),
+    top: Math.max(Math.round(window.innerHeight * SWIM_AREA_TOP_RATIO), window.innerHeight - PET_SIZE - DESK_BOTTOM),
   }
 }
 
@@ -126,36 +137,56 @@ function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): Blu
   }
 }
 
-/** 线性插值重采样到 16k（AudioContext 构造指定 sampleRate 可能不被采纳）。 */
-function resampleTo16k(data: Float32Array, fromRate: number): Float32Array {
-  if (fromRate === 16000) return data
-  const ratio = fromRate / 16000
-  const out = new Float32Array(Math.max(1, Math.round(data.length / ratio)))
-  for (let i = 0; i < out.length; i += 1) {
-    const pos = i * ratio
-    const i0 = Math.floor(pos)
-    const i1 = Math.min(i0 + 1, data.length - 1)
-    out[i] = (data[i0] ?? 0) + ((data[i1] ?? 0) - (data[i0] ?? 0)) * (pos - i0)
-  }
-  return out
+/** Compact token count: 517 / 12.2K / 517K / 1.2M (one decimal under three digits). */
+function formatTokens(n: number): string {
+  const scaled = (v: number): string =>
+    v >= 100 ? String(Math.round(v)) : String(Math.round(v * 10) / 10)
+  if (n < 1_000) return String(n)
+  if (n < 1_000_000) return `${scaled(n / 1_000)}K`
+  return `${scaled(n / 1_000_000)}M`
 }
 
-/** 把识别文本注入对话输入框（受控组件：原生 value setter + input 事件）。 */
-function injectIntoComposer(text: string): boolean {
-  const ta = document.querySelector<HTMLTextAreaElement>('[data-composer-card] textarea[data-phase]')
-  if (!ta || ta.disabled || ta.readOnly) return false
-  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
-  if (!setter) return false
-  setter.call(ta, text)
-  ta.dispatchEvent(new Event('input', { bubbles: true }))
-  ta.focus()
-  return true
+/** Compact duration: 45.2s under a minute, 2m42s from there on. */
+function formatDuration(ms: number): string {
+  const s = ms / 1_000
+  if (s < 60) return `${Math.round(s * 10) / 10}s`
+  const whole = Math.round(s)
+  return `${Math.floor(whole / 60)}m${whole % 60}s`
+}
+
+/** 花费显示：¥0.083（保留 3~4 位小数，小额不吞零）。 */
+function formatCost(cost: number): string {
+  if (cost >= 1) return `¥${cost.toFixed(2)}`
+  if (cost >= 0.01) return `¥${cost.toFixed(3)}`
+  return `¥${cost.toFixed(4)}`
+}
+
+/** 饱腹度环形进度（24px SVG），>阈值变橙。 */
+function SatietyRing({ percent }: { percent: number | null }): JSX.Element {
+  const p = percent ?? 0
+  const hot = p > SATIETY_BURP_PERCENT
+  const r = 9
+  const c = 2 * Math.PI * r
+  return (
+    <svg width="24" height="24" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
+      <circle cx="12" cy="12" r={r} fill="none" stroke="rgba(255,255,255,0.15)" strokeWidth="3" />
+      <circle
+        cx="12" cy="12" r={r} fill="none"
+        stroke={hot ? '#ff8c4b' : '#4bd6c8'}
+        strokeWidth="3"
+        strokeLinecap="round"
+        strokeDasharray={`${Math.max(0.5, c * p / 100)} ${c}`}
+        transform="rotate(-90 12 12)"
+        style={{ transition: 'stroke-dasharray 0.4s ease' }}
+      />
+    </svg>
+  )
 }
 
 /**
  * The floating pet body. Pure presentational: reads the snapshot, plays the
  * right segmented sequence, and handles local interactions (drag, hover,
- * wander, fish snack, tap-to-talk voice input).
+ * wander, fish snack, tap-to-open stats panel, satiety burp).
  */
 export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjected): ReturnType<typeof createPortal> {
   const hostTrack: BlubbyTrack = snapshot?.track ?? 'idle'
@@ -165,8 +196,6 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // while the host still reports the track (poll lag); settle locally.
   const [settledIdle, setSettledIdle] = useState(false)
   // Wander position for idle swimming (left/top so dragging is direct).
-  // Initial position is FIXED — never random, so the pet does not jump
-  // before it starts swimming.
   const [pos, setPos] = useState(initialPos)
   const [dragging, setDragging] = useState(false)
   // True while the pet is actively swimming (doing frames move the position).
@@ -176,102 +205,22 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // Fish snack drops (done state, CSS-drawn — no asset). Multiple snacks
   // when the turn consumed more output tokens.
   const [snacks, setSnacks] = useState<{ id: number; delayMs: number }[]>([])
+  // Stats panel (tap to toggle): feeding stats of the active session.
+  const [panelOpen, setPanelOpen] = useState(false)
+  // "好撑" burp effect (satiety grew past the threshold).
+  const [burping, setBurping] = useState(false)
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const lastPosRef = useRef(pos)
   const dirTimer = useRef<number | undefined>(undefined)
   // Current swim direction as an angle in radians: 0 → right (source facing),
   // π → left (mirrored). Vertical tilt stays within ±SWIM_MAX_TILT.
   const swimAngle = useRef(0)
-  // ---- tap-to-talk voice input: tap the pet to record, tap again to stop.
-  // The recognized text is injected into the conversation composer. ----
-  const [recording, setRecording] = useState(false)
-  const [recError, setRecError] = useState<string | null>(null)
-  const mediaRef = useRef<{
-    stream: MediaStream
-    ctx: AudioContext
-    source: MediaStreamAudioSourceNode
-    processor: ScriptProcessorNode
-    chunks: Int16Array[]
-  } | null>(null)
-  const recTimeoutRef = useRef<number | undefined>(undefined)
-  // Pointer-down snapshot, to tell a tap (→ voice input) from a drag.
+  // Pointer-down snapshot, to tell a tap (→ open panel) from a drag.
   const downRef = useRef<{ x: number; y: number; t: number } | null>(null)
-
-  /** 开始录音：麦克风 → PCM 16k/mono/16bit 攒字节，20s 自动停止。 */
-  async function startRecording(): Promise<void> {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      const ctx = new AudioContext({ sampleRate: 16000 })
-      await ctx.resume()
-      const source = ctx.createMediaStreamSource(stream)
-      const processor = ctx.createScriptProcessor(4096, 1, 1)
-      const chunks: Int16Array[] = []
-      processor.onaudioprocess = (e: AudioProcessingEvent): void => {
-        const data = resampleTo16k(e.inputBuffer.getChannelData(0), ctx.sampleRate)
-        const samples = new Int16Array(data.length)
-        for (let i = 0; i < data.length; i += 1) {
-          const s = Math.max(-1, Math.min(1, data[i] ?? 0))
-          samples[i] = s < 0 ? s * 0x8000 : s * 0x7fff
-        }
-        chunks.push(samples)
-      }
-      source.connect(processor)
-      processor.connect(ctx.destination)
-      mediaRef.current = { stream, ctx, source, processor, chunks }
-      setRecording(true)
-      setRecError(null)
-      recTimeoutRef.current = window.setTimeout(() => { void stopRecording() }, 20000)
-    } catch {
-      setRecError('麦克风不可用')
-    }
-  }
-
-  /** 停止录音 → 上传 PCM → 服务端 ASR → 文本注入输入框。 */
-  async function stopRecording(): Promise<void> {
-    if (recTimeoutRef.current !== undefined) {
-      window.clearTimeout(recTimeoutRef.current)
-      recTimeoutRef.current = undefined
-    }
-    const rec = mediaRef.current
-    mediaRef.current = null
-    setRecording(false)
-    if (!rec) return
-    try {
-      rec.processor.disconnect()
-      rec.source.disconnect()
-      rec.stream.getTracks().forEach((track) => track.stop())
-      await rec.ctx.close()
-      let total = 0
-      for (const chunk of rec.chunks) total += chunk.length
-      if (total === 0) { setRecError('没听到声音'); return }
-      const merged = new Int16Array(total)
-      let offset = 0
-      for (const chunk of rec.chunks) { merged.set(chunk, offset); offset += chunk.length }
-      const pcm = new Uint8Array(merged.buffer)
-      const res = await fetch('/api/blubby/asr', {
-        method: 'POST',
-        headers: { 'content-type': 'application/octet-stream' },
-        body: pcm,
-      })
-      const data = await res.json() as { ok?: boolean; text?: string; error?: string }
-      if (!res.ok || data.ok === false) throw new Error(data.error ?? `识别失败(${res.status})`)
-      const text = (data.text ?? '').trim()
-      if (!text) { setRecError('没听清，再说一次'); return }
-      if (!injectIntoComposer(text)) setRecError('输入框当前不可用')
-    } catch (error) {
-      setRecError(error instanceof Error ? error.message : '识别失败')
-    }
-  }
-
-  /** 点一下 = 开/停录音（正在录就停，否则开）。 */
-  function toggleRecording(): void {
-    if (mediaRef.current !== null) void stopRecording()
-    else void startRecording()
-  }
 
   const track: BlubbyTrack = hovered && !dragging ? 'waiting' : settledIdle ? 'idle' : hostTrack
 
-  // ---- drag to anywhere + tap-to-talk ----
+  // ---- drag to anywhere in the lower half + tap to open the stats panel ----
   const onPointerDown = (e: React.PointerEvent): void => {
     e.preventDefault()
     setDragging(true)
@@ -287,8 +236,13 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       const left = e.clientX - off.offsetX
       const top = e.clientY - off.offsetY
       const maxLeft = window.innerWidth - PET_SIZE
+      // 拖拽与游泳一致：不允许进上半屏。
+      const minTop = Math.round(window.innerHeight * SWIM_AREA_TOP_RATIO)
       const maxTop = window.innerHeight - PET_SIZE
-      const clamped = { left: Math.max(0, Math.min(maxLeft, left)), top: Math.max(0, Math.min(maxTop, top)) }
+      const clamped = {
+        left: Math.max(0, Math.min(maxLeft, left)),
+        top: Math.max(minTop, Math.min(maxTop, top)),
+      }
       setPos(clamped)
       // Face the drag direction.
       if (clamped.left < lastPosRef.current.left - 2) setFacingLeft(true)
@@ -296,12 +250,12 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       lastPosRef.current = clamped
     }
     const onUp = (e: PointerEvent): void => {
-      // A tap (press < 500ms, moved < 6px) toggles voice input; anything
+      // A tap (press < 500ms, moved < 6px) toggles the stats panel; anything
       // bigger was a drag.
       const down = downRef.current
       downRef.current = null
       if (down && Date.now() - down.t < 500 && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 6) {
-        toggleRecording()
+        setPanelOpen((open) => !open)
       }
       setDragging(false)
       dragRef.current = null
@@ -313,6 +267,21 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       window.removeEventListener('pointerup', onUp)
     }
   }, [dragging])
+
+  // ---- 好撑：饱腹度 > 阈值 且 本次 poll 有增加 → 打嗝特效一次 ----
+  const satietyPercent = snapshot?.satiety?.percent ?? null
+  const prevSatietyRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (satietyPercent === null) return
+    const prev = prevSatietyRef.current
+    if (prev !== null && satietyPercent > SATIETY_BURP_PERCENT && satietyPercent > prev) {
+      setBurping(true)
+      const timer = window.setTimeout(() => setBurping(false), BURP_MS)
+      prevSatietyRef.current = satietyPercent
+      return () => window.clearTimeout(timer)
+    }
+    prevSatietyRef.current = satietyPercent
+  }, [satietyPercent])
 
   // Park at the desk spot while 办公/完成 (and clear any swim timers).
   useEffect(() => {
@@ -374,12 +343,9 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   }, [track, playlist, frameIdx])
 
   // ---- swimming movement: ONLY during the doing frames ----
-  // Each doing frame moves the pet by SWIM_STEP_PX along swimAngle (constant
-  // speed in any direction). initial/enter/exit frames (dive in/out) keep the
-  // pet in place. Direction switches happen on SWIM_DIR_HOLD_MS.
   const minLeft = 8
   const maxLeft = () => window.innerWidth - PET_SIZE - 8
-  const minTop = Math.round((typeof window !== 'undefined' ? window.innerHeight : 800) * 0.55)
+  const minTop = Math.round((typeof window !== 'undefined' ? window.innerHeight : 800) * SWIM_AREA_TOP_RATIO)
   const maxTop = () => window.innerHeight - PET_SIZE - 8
 
   useEffect(() => {
@@ -465,22 +431,100 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
     if (frameIdx >= playlist.frames.length - 3) setSnacks([]) // mouth closed again
   }, [track, frameIdx, playlist, segments, snacks, snapshot])
 
-  const bubble = recording ? '🎤 听你说…' : recError ?? (!hovered ? snapshot?.bubble : undefined)
+  const bubble = burping ? '好撑…吃不下啦' : (!hovered ? snapshot?.bubble : undefined)
 
-  // 识别错误气泡 5s 后自动消失。
-  useEffect(() => {
-    if (!recError) return
-    const timer = window.setTimeout(() => setRecError(null), 5000)
-    return () => window.clearTimeout(timer)
-  }, [recError])
+  // ---- stats strip: satiety ring · cost · efficiency (常驻) ----
+  const satiety = snapshot?.satiety
+  const cost = snapshot?.cost ?? 0
+  const efficiency = snapshot?.efficiency ?? null
+  const stats = snapshot?.stats
+  const food = snapshot?.food
+  const statsStrip = (
+    <div
+      style={{
+        position: 'absolute',
+        top: 'calc(100% + 6px)',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '3px 10px',
+        borderRadius: 999,
+        background: 'rgba(14,16,26,0.82)',
+        border: '1px solid rgba(255,255,255,0.08)',
+        color: '#c8d0e0',
+        fontSize: 11,
+        lineHeight: '16px',
+        whiteSpace: 'nowrap',
+        fontVariantNumeric: 'tabular-nums',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.35)',
+        userSelect: 'none',
+      }}
+    >
+      <SatietyRing percent={satiety?.percent ?? null} />
+      <span>{satiety !== null && satiety !== undefined ? `${satiety.percent}%` : '--%'}</span>
+      <span style={{ opacity: 0.35 }}>|</span>
+      <span>¥{(cost > 0 ? cost : 0).toFixed(3)}</span>
+      <span style={{ opacity: 0.35 }}>|</span>
+      <span>⚡{efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}</span>
+    </div>
+  )
 
-  // 组件卸载时停掉录音（释放麦克风）。
-  useEffect(() => () => {
-    const rec = mediaRef.current
-    if (!rec) return
-    rec.stream.getTracks().forEach((track) => track.stop())
-    void rec.ctx.close()
-  }, [])
+  // ---- stats panel: tap the pet to open ----
+  const panel = panelOpen ? (
+    <div
+      style={{
+        position: 'absolute',
+        bottom: 'calc(100% + 30px)',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        width: 272,
+        padding: '12px 14px',
+        borderRadius: 14,
+        background: 'rgba(14,16,26,0.92)',
+        border: '1px solid rgba(255,255,255,0.1)',
+        color: '#e6ebf4',
+        fontSize: 12,
+        lineHeight: '20px',
+        boxShadow: '0 8px 28px rgba(0,0,0,0.5)',
+        fontVariantNumeric: 'tabular-nums',
+        userSelect: 'none',
+        zIndex: 1,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>小咕噜 · 本会话</span>
+        <span style={{ opacity: 0.5, fontSize: 11, cursor: 'pointer' }} onClick={() => setPanelOpen(false)}>✕</span>
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <SatietyRing percent={satiety?.percent ?? null} />
+        <span>
+          饱腹度 {satiety !== null && satiety !== undefined ? `${satiety.percent}%` : '--'}
+          {satiety !== null && satiety !== undefined && (
+            <span style={{ opacity: 0.55 }}> · 上下文 {formatTokens(satiety.usedTokens)} / {formatTokens(satiety.contextWindow)}</span>
+          )}
+        </span>
+      </div>
+      <div style={{ marginTop: 6, opacity: 0.85 }}>
+        🍚 主食 {formatTokens(food?.systemTokens ?? 0)} · 🐟 小鱼干 {formatTokens(food?.toolTokens ?? 0)} · 🥬 团子 {formatTokens(food?.chatTokens ?? 0)}
+      </div>
+      <div style={{ opacity: 0.85 }}>⚡ 工作效率 {efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}（缓存命中）</div>
+      <div style={{ opacity: 0.85 }}>💰 花费 {formatCost(cost)}（官方一口价）</div>
+      {stats !== undefined && (
+        <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', opacity: 0.85 }}>
+          <div>
+            ⏱ LLM {formatDuration(stats.llmMs)}
+            {stats.toolMs > 0 && <> · 工具 {formatDuration(stats.toolMs)}</>}
+          </div>
+          <div>
+            🚀 首 token {stats.ttftSteps > 0 ? formatDuration(stats.ttftMs / stats.ttftSteps) : '--'}
+            {stats.tokensPerSec !== null && <> · {stats.tokensPerSec} tok/s</>}
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null
 
   const float = (
     <div
@@ -503,6 +547,8 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
             : 'left 1.2s ease-in-out, top 1.2s ease-in-out',
         userSelect: 'none',
         touchAction: 'none',
+        // 好撑打嗝：轻微上下抖动。
+        animation: burping ? 'dshBlubbyBurp 0.5s ease-in-out 3' : undefined,
       }}
       onPointerDown={onPointerDown}
       onMouseEnter={() => { if (!dragging) setHovered(true) }}
@@ -565,6 +611,11 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           from { top: -14%; transform: translateX(-50%) rotate(0deg); opacity: 1; }
           to   { top: 46%; transform: translateX(-50%) rotate(20deg); opacity: 1; }
         }
+        @keyframes dshBlubbyBurp {
+          0%, 100% { transform: translateY(0); }
+          25% { transform: translateY(-10px); }
+          75% { transform: translateY(-4px); }
+        }
       `}</style>
       {bubble !== undefined && (
         <div
@@ -589,6 +640,8 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           {bubble}
         </div>
       )}
+      {panel}
+      {statsStrip}
       {transportFailed && (
         <div
           style={{
