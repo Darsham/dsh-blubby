@@ -15,7 +15,7 @@
 /** Activity phases understood by the blubby host. */
 export type BlubbyPhase = 'idle' | 'waiting' | 'thinking' | 'tool' | 'review' | 'done' | 'failed'
 
-/** The 5-track video animation contract (assets/blubby/*.mp4). */
+/** The 5-track animation contract (assets/blubby/frames/*.webp). */
 export type BlubbyTrack = 'idle' | 'waiting' | 'running' | 'done' | 'failed'
 
 /** One input snapshot consumed by the machine. */

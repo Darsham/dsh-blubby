@@ -40,7 +40,6 @@ export function blubbyAssetsDir(importMetaUrl: string): string {
 
 /** Content type for one asset file, by extension. */
 function mimeFor(file: string): string {
-  if (file.endsWith('.mp4')) return 'video/mp4'
   if (file.endsWith('.webm')) return 'video/webm'
   if (file.endsWith('.png')) return 'image/png'
   if (file.endsWith('.jpg') || file.endsWith('.jpeg')) return 'image/jpeg'

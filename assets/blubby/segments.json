@@ -44,9 +44,7 @@
           "idle_exit_31.webp",
           "idle_exit_32.webp"
         ]
-      },
-      "loopable": true,
-      "frames": {}
+      }
     },
     "waiting": {
       "segments": {
@@ -82,9 +80,7 @@
           "waiting_exit_23.webp",
           "waiting_exit_24.webp"
         ]
-      },
-      "loopable": true,
-      "frames": {}
+      }
     },
     "running": {
       "segments": {
@@ -128,9 +124,7 @@
           "running_exit_31.webp",
           "running_exit_32.webp"
         ]
-      },
-      "loopable": true,
-      "frames": {}
+      }
     },
     "done": {
       "segments": {
@@ -170,9 +164,7 @@
           "done_exit_27.webp",
           "done_exit_28.webp"
         ]
-      },
-      "loopable": true,
-      "frames": {}
+      }
     },
     "failed": {
       "segments": {
@@ -240,9 +232,7 @@
           "failed_exit_55.webp",
           "failed_exit_56.webp"
         ]
-      },
-      "loopable": false,
-      "frames": {}
+      }
     }
   }
 }

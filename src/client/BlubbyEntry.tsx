@@ -2,13 +2,15 @@
  * BlubbyEntry — the floating 小咕噜. One React root on document.body,
  * driven by the host snapshot polled every 2s. The pet plays segmented
  * keyframe sequences (transparent webp, no mp4): each state is split into
- * initial → enter → doing (loopable) → exit segments so the doing phase
- * can be repeated to extend the animation duration.
- * Local interactions that never touch the host:
- *   - mouse hover → 疑惑脸 (waiting track)
- *   - idle swimming → the pet wanders the lower half of the viewport
- *   - running (办公) → the pet parks at a fixed desk spot (bottom-right)
- *   - done (吃饱) → a fish-snack drops from the top into the pet's mouth
+ * initial → enter → doing → exit segments, and the playback mode per track
+ * decides what loops:
+ *   - idle    (游泳): full playlist loop (initial→enter→doing×3→exit→…)
+ *   - waiting (疑惑): play initial+enter once, then HOLD the歪头 doing frame
+ *   - running (办公): loop ONLY the doing (敲键盘) segment — no 思考 transition
+ *   - done    (吃饱): one-shot, fish snack drops into the open mouth (CSS-drawn)
+ *   - failed  (挨扇): one-shot, settles back to idle
+ * The pet faces the direction it swims: source frames face right, moving
+ * left mirrors with scaleX(-1). It is draggable anywhere in the viewport.
  * @module dsh-blubby/client/BlubbyEntry
  */
 
@@ -23,7 +25,6 @@ export interface BlubbySegments {
   size: number
   states: Record<BlubbyTrack, {
     segments: Record<'initial' | 'enter' | 'doing' | 'exit', string[]>
-    loopable: boolean
   }>
 }
 
@@ -37,12 +38,19 @@ export interface BlubbyInjected {
   segments: BlubbySegments | null
 }
 
-/** Tracks that settle back to idle after a one-shot play. */
-function isOneShot(track: BlubbyTrack): boolean {
-  return track === 'done' || track === 'failed'
+/** Playback mode per track. */
+type PlayMode = 'loop-full' | 'loop-doing' | 'hold' | 'one-shot'
+
+/** Which mode each track uses. */
+const PLAY_MODES: Record<BlubbyTrack, PlayMode> = {
+  idle: 'loop-full',     // 游泳：完整循环
+  waiting: 'hold',       // 疑惑：保持歪头不动
+  running: 'loop-doing', // 办公：只循环敲键盘
+  done: 'one-shot',      // 吃饱：一次性
+  failed: 'one-shot',    // 挨扇：一次性
 }
 
-/** How many times the doing segment repeats before the exit segment. */
+/** How many times the doing segment repeats in loop-full / one-shot. */
 const DOING_REPEAT = 3
 
 /** The bottom-right desk spot the pet parks at while 办公. */
@@ -53,37 +61,40 @@ const DESK_BOTTOM = 96
 const PET_SIZE = 220
 
 /** Random wander target within the lower half of the viewport. */
-function wanderTarget(): { right: number; bottom: number } {
-  const right = 24 + Math.random() * Math.min(320, window.innerWidth * 0.3)
-  const bottom = 48 + Math.random() * Math.min(180, window.innerHeight * 0.22)
-  return { right, bottom }
+function wanderTarget(): { left: number; top: number } {
+  const maxLeft = window.innerWidth - PET_SIZE - 16
+  const maxTop = window.innerHeight - PET_SIZE - 16
+  const left = Math.max(8, Math.min(maxLeft, 8 + Math.random() * Math.min(360, window.innerWidth * 0.32)))
+  const top = Math.max(Math.round(window.innerHeight * 0.55), Math.min(maxTop, window.innerHeight * 0.55 + Math.random() * Math.min(140, window.innerHeight * 0.18)))
+  return { left, top }
 }
 
 /**
- * Build the flat frame playlist for a track:
- * initial → enter → doing × DOING_REPEAT → exit.
- * One-shot tracks (done/failed) end the playlist at the last exit frame;
- * looping tracks cycle the whole playlist forever.
+ * Build the flat frame playlist for a track per its play mode:
+ *   loop-full : initial → enter → doing×3 → exit (cycle forever)
+ *   loop-doing: doing (cycle the doing segment only)
+ *   hold      : initial → enter → doing[0] (stop on the歪头 frame)
+ *   one-shot  : initial → enter → doing×3 → exit (play once, hold last)
  */
 function buildPlaylist(track: BlubbyTrack, segments: BlubbySegments | null): string[] | null {
   if (!segments) return null
   const state = segments.states[track]
   if (!state) return null
   const seg = state.segments
-  return [
-    ...seg.initial,
-    ...seg.enter,
-    ...seg.doing,
-    ...seg.doing,
-    ...seg.doing,
-    ...seg.exit,
-  ]
+  const doing = seg.doing
+  const mode = PLAY_MODES[track]
+  if (mode === 'loop-doing') return [...doing]
+  const holdFrame = doing[0]
+  if (mode === 'hold') return [...seg.initial, ...seg.enter, ...(holdFrame ? [holdFrame] : [])]
+  const repeated: string[] = []
+  for (let i = 0; i < DOING_REPEAT; i += 1) repeated.push(...doing)
+  return [...seg.initial, ...seg.enter, ...repeated, ...seg.exit]
 }
 
 /**
  * The floating pet body. Pure presentational: reads the snapshot, plays the
- * right segmented sequence, and handles local interactions (hover, wander,
- * fish snack).
+ * right segmented sequence, and handles local interactions (drag, hover,
+ * wander, fish snack).
  */
 export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjected): ReturnType<typeof createPortal> {
   const hostTrack: BlubbyTrack = snapshot?.track ?? 'idle'
@@ -92,22 +103,70 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // Local override: one-shot done/failed already played out client-side
   // while the host still reports the track (poll lag); settle locally.
   const [settledIdle, setSettledIdle] = useState(false)
-  // Wander position for idle swimming.
+  // Wander position for idle swimming (left/top so dragging is direct).
   const [pos, setPos] = useState(() => wanderTarget())
+  const [dragging, setDragging] = useState(false)
+  // Facing: source frames face right; mirror when moving/swimming left.
+  const [facingLeft, setFacingLeft] = useState(false)
+  // Fish snack drop state (done state, CSS-drawn — no asset).
+  const [snack, setSnack] = useState<{ left: number; top: number } | null>(null)
+  const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
+  const lastPosRef = useRef(pos)
   const wanderTimer = useRef<number | undefined>(undefined)
 
-  const track: BlubbyTrack = hovered ? 'waiting' : settledIdle ? 'idle' : hostTrack
+  const track: BlubbyTrack = hovered && !dragging ? 'waiting' : settledIdle ? 'idle' : hostTrack
 
-  // Idle swimming: wander the lower half every few seconds.
+  // ---- drag to anywhere ----
+  const onPointerDown = (e: React.PointerEvent): void => {
+    e.preventDefault()
+    setDragging(true)
+    setHovered(false)
+    dragRef.current = { offsetX: e.clientX - pos.left, offsetY: e.clientY - pos.top }
+  }
   useEffect(() => {
-    if (track === 'idle') {
+    if (!dragging) return
+    const onMove = (e: PointerEvent): void => {
+      const off = dragRef.current
+      if (!off) return
+      const left = e.clientX - off.offsetX
+      const top = e.clientY - off.offsetY
+      const maxLeft = window.innerWidth - PET_SIZE
+      const maxTop = window.innerHeight - PET_SIZE
+      const clamped = { left: Math.max(0, Math.min(maxLeft, left)), top: Math.max(0, Math.min(maxTop, top)) }
+      setPos(clamped)
+      // Face the drag direction.
+      if (clamped.left < lastPosRef.current.left - 2) setFacingLeft(true)
+      else if (clamped.left > lastPosRef.current.left + 2) setFacingLeft(false)
+      lastPosRef.current = clamped
+    }
+    const onUp = (): void => {
+      setDragging(false)
+      dragRef.current = null
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [dragging])
+
+  // Idle swimming: wander the lower half every few seconds; face the move.
+  useEffect(() => {
+    if (track === 'idle' && !dragging) {
       const move = (): void => {
-        setPos(wanderTarget())
+        const target = wanderTarget()
+        setPos((current) => {
+          setFacingLeft(target.left < current.left - 2)
+          lastPosRef.current = target
+          return target
+        })
         wanderTimer.current = window.setTimeout(move, 3500)
       }
       wanderTimer.current = window.setTimeout(move, 2500)
       return () => {
         if (wanderTimer.current !== undefined) window.clearTimeout(wanderTimer.current)
+        wanderTimer.current = undefined
       }
     }
     if (wanderTimer.current !== undefined) {
@@ -115,8 +174,15 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       wanderTimer.current = undefined
     }
     // 办公/完成: park at the desk spot.
-    if (track === 'running' || track === 'done') setPos({ right: DESK_RIGHT, bottom: DESK_BOTTOM })
-  }, [track])
+    if (track === 'running' || track === 'done') {
+      const desk = {
+        left: window.innerWidth - PET_SIZE - DESK_RIGHT,
+        top: window.innerHeight - PET_SIZE - DESK_BOTTOM,
+      }
+      setPos(desk)
+      lastPosRef.current = desk
+    }
+  }, [track, dragging])
 
   // Reset the local settled flag when the host reports a fresh one-shot.
   useEffect(() => {
@@ -128,20 +194,31 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   const [frameIdx, setFrameIdx] = useState(0)
   const frameMs = segments?.frameMs ?? 125
 
+  // Preload the whole playlist so frame switches never flash white.
+  useEffect(() => {
+    if (!playlist) return
+    for (const name of playlist) {
+      const img = new Image()
+      img.src = `/blubby/frames/${name}`
+    }
+  }, [playlist])
+
   // Restart the playlist whenever the track changes.
   useEffect(() => {
     setFrameIdx(0)
   }, [track, segments])
 
-  // Advance the playlist on a fixed rhythm; one-shot tracks stop at the end.
+  // Advance the playlist on a fixed rhythm per play mode.
   useEffect(() => {
     if (!playlist) return
     const timer = window.setInterval(() => {
       setFrameIdx((idx) => {
         const next = idx + 1
         if (next < playlist.length) return next
-        if (isOneShot(track)) return idx // hold the last exit frame
-        return 0 // looping track: cycle the whole playlist
+        // End of playlist:
+        if (track === 'waiting') return idx // hold the歪头 frame
+        if (PLAY_MODES[track] === 'one-shot') return idx // hold last exit frame
+        return 0 // loop-full / loop-doing: cycle
       })
     }, frameMs)
     return () => window.clearInterval(timer)
@@ -149,29 +226,45 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
 
   // One-shot finished (we're holding the final frame): settle locally.
   useEffect(() => {
-    if (isOneShot(track) && playlist && frameIdx === playlist.length - 1) {
+    if (PLAY_MODES[track] === 'one-shot' && playlist && frameIdx === playlist.length - 1) {
       setSettledIdle(true)
     }
   }, [track, playlist, frameIdx])
 
+  // Fish snack: when the done track plays the open-mouth frame, drop a
+  // CSS-drawn snack from above into the mouth (~48% height, 50% width).
   const frameUrl = playlist ? `/blubby/frames/${playlist[frameIdx]}` : null
+  useEffect(() => {
+    if (track !== 'done' || !playlist) return
+    // The open-mouth frame is the 3rd frame of the enter segment: find its
+    // index in the playlist (after initial).
+    const enterStart = segments?.states.done.segments.initial.length ?? 5
+    if (frameIdx === enterStart + 2 && !snack) {
+      setSnack({ left: 50, top: 48 })
+    }
+    if (frameIdx >= playlist.length - 3) setSnack(null) // mouth closed again
+  }, [track, frameIdx, playlist, segments, snack])
+
   const bubble = !hovered ? snapshot?.bubble : undefined
 
   const float = (
     <div
       style={{
         position: 'fixed',
-        right: pos.right,
-        bottom: pos.bottom,
+        left: pos.left,
+        top: pos.top,
         zIndex: 2147483000,
         width: PET_SIZE,
         height: PET_SIZE,
         pointerEvents: 'auto',
-        cursor: 'grab',
-        transition: 'right 1.2s ease-in-out, bottom 1.2s ease-in-out',
+        cursor: dragging ? 'grabbing' : 'grab',
+        // No position transition while dragging (must follow the mouse).
+        transition: dragging ? 'none' : 'left 1.2s ease-in-out, top 1.2s ease-in-out',
         userSelect: 'none',
+        touchAction: 'none',
       }}
-      onMouseEnter={() => setHovered(true)}
+      onPointerDown={onPointerDown}
+      onMouseEnter={() => { if (!dragging) setHovered(true) }}
       onMouseLeave={() => setHovered(false)}
     >
       <img
@@ -183,10 +276,53 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
           height: '100%',
           objectFit: 'contain',
           display: 'block',
-          // 透明 webp 关键帧直接叠加，无底色混合
+          transform: facingLeft ? 'scaleX(-1)' : undefined,
           background: 'transparent',
         }}
       />
+      {/* CSS-drawn fish snack (done state), no asset */}
+      {snack && track === 'done' && (
+        <div
+          style={{
+            position: 'absolute',
+            left: `${snack.left}%`,
+            top: '-14%',
+            width: 30,
+            height: 16,
+            transform: 'translateX(-50%)',
+            zIndex: -1,
+            animation: 'dshBlubbySnackDrop 0.7s ease-in forwards',
+          }}
+        >
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'radial-gradient(circle at 30% 40%, #ffb347, #ff8c00)',
+              borderRadius: '50% 50% 50% 50% / 60% 60% 40% 40%',
+              boxShadow: '0 1px 2px rgba(0,0,0,0.3)',
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              right: -8,
+              top: '50%',
+              width: 12,
+              height: 8,
+              background: '#ff8c00',
+              clipPath: 'polygon(0 0, 100% 50%, 0 100%)',
+              transform: 'translateY(-50%)',
+            }}
+          />
+        </div>
+      )}
+      <style>{`
+        @keyframes dshBlubbySnackDrop {
+          from { top: -14%; transform: translateX(-50%) rotate(0deg); opacity: 1; }
+          to   { top: 46%; transform: translateX(-50%) rotate(20deg); opacity: 1; }
+        }
+      `}</style>
       {bubble !== undefined && (
         <div
           style={{
