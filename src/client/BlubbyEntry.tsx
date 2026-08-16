@@ -161,6 +161,14 @@ function formatCost(cost: number): string {
   return `¥${cost.toFixed(4)}`
 }
 
+/** 饱腹度百分比：0 但有实际用量时显示 <1%（几千 token / 1M 窗口取整为 0）。 */
+function formatSatietyPercent(percent: number | null | undefined, usedTokens: number | undefined): string {
+  if (percent === null || percent === undefined) return '--%'
+  if (percent > 0) return `${percent}%`
+  if ((usedTokens ?? 0) > 0) return '<1%'
+  return '0%'
+}
+
 /** 饱腹度环形进度（24px SVG），>阈值变橙。 */
 function SatietyRing({ percent }: { percent: number | null }): JSX.Element {
   const p = percent ?? 0
@@ -463,9 +471,9 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       }}
     >
       <SatietyRing percent={satiety?.percent ?? null} />
-      <span>{satiety !== null && satiety !== undefined ? `${satiety.percent}%` : '--%'}</span>
+      <span>{formatSatietyPercent(satiety?.percent, satiety?.usedTokens)}</span>
       <span style={{ opacity: 0.35 }}>|</span>
-      <span>¥{(cost > 0 ? cost : 0).toFixed(3)}</span>
+      <span>{formatCost(cost)}</span>
       <span style={{ opacity: 0.35 }}>|</span>
       <span>⚡{efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}</span>
     </div>
@@ -494,20 +502,20 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>小咕噜 · 本会话</span>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>小咕噜 · 本次运行</span>
         <span style={{ opacity: 0.5, fontSize: 11, cursor: 'pointer' }} onClick={() => setPanelOpen(false)}>✕</span>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <SatietyRing percent={satiety?.percent ?? null} />
         <span>
-          饱腹度 {satiety !== null && satiety !== undefined ? `${satiety.percent}%` : '--'}
+          饱腹度 {formatSatietyPercent(satiety?.percent, satiety?.usedTokens)}
           {satiety !== null && satiety !== undefined && (
             <span style={{ opacity: 0.55 }}> · 上下文 {formatTokens(satiety.usedTokens)} / {formatTokens(satiety.contextWindow)}</span>
           )}
         </span>
       </div>
       <div style={{ marginTop: 6, opacity: 0.85 }}>
-        🍚 主食 {formatTokens(food?.systemTokens ?? 0)} · 🐟 小鱼干 {formatTokens(food?.toolTokens ?? 0)} · 🥬 团子 {formatTokens(food?.chatTokens ?? 0)}
+        系统提示词 {formatTokens(food?.systemTokens ?? 0)} · 工具 {formatTokens(food?.toolTokens ?? 0)} · 对话消息 {formatTokens(food?.chatTokens ?? 0)}
       </div>
       <div style={{ opacity: 0.85 }}>⚡ 工作效率 {efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}（缓存命中）</div>
       <div style={{ opacity: 0.85 }}>💰 花费 {formatCost(cost)}（官方一口价）</div>

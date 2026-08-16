@@ -72,7 +72,8 @@ export class BlubbyService extends Service {
   private disposeActivity: (() => void) | undefined
   /** Session whose most recent meaningful event currently drives the pet. */
   private displaySession: Session | undefined
-  private readonly sessionActivity = new WeakMap<Session, ProjectionRuntime>()
+  /** 全局累计统计（host 生命周期，跨会话保留，不随会话 dispose 清空）。 */
+  private readonly stats: ProjectionRuntime = emptyProjectionRuntime()
 
   constructor(ctx: Context, config: BlubbyConfig = {}) {
     super(ctx, 'blubby')
@@ -106,8 +107,8 @@ export class BlubbyService extends Service {
     this.disposeActivity = (() => {
       const disposers = [
         this.ctx.on('session/event', (session: Session, event: SessionEvent) => {
-          const runtime = this.activityRuntime(session)
-          const transition = projectOfficialEvent(event, runtime)
+          // 动画状态跟踪最近一次事件；统计在全局 stats 上跨会话累计。
+          const transition = projectOfficialEvent(event, this.stats)
           if (transition === undefined) return
           this.applyActivity(session, transition.input)
         }),
@@ -121,16 +122,6 @@ export class BlubbyService extends Service {
     })()
   }
 
-  /** Return the projection state associated with one live session. */
-  private activityRuntime(session: Session): ProjectionRuntime {
-    let runtime = this.sessionActivity.get(session)
-    if (runtime === undefined) {
-      runtime = emptyProjectionRuntime()
-      this.sessionActivity.set(session, runtime)
-    }
-    return runtime
-  }
-
   /** Commit one activity as the host-global pet's most recent display state. */
   private applyActivity(session: Session, input: BlubbyStateInput): void {
     this.displaySession = session
@@ -140,9 +131,7 @@ export class BlubbyService extends Service {
 
   private view(): BlubbyStateView {
     const snapshot = this.machine.render()
-    const runtime = this.displaySession !== undefined
-      ? this.sessionActivity.get(this.displaySession)
-      : undefined
+    const s = this.stats
     return {
       track: snapshot.track,
       ...(snapshot.bubble === undefined ? {} : { bubble: snapshot.bubble }),
@@ -150,20 +139,18 @@ export class BlubbyService extends Service {
       sessionActive: snapshot.sessionActive,
       stateStartedAt: snapshot.stateStartedAt,
       ...(snapshot.tokens === undefined ? {} : { tokens: snapshot.tokens }),
-      // 养成统计：随活动会话给出（无会话时省略，前端走默认）。
-      ...(runtime === undefined ? {} : {
-        satiety: runtime.satiety,
-        food: runtime.food,
-        efficiency: runtime.efficiency,
-        cost: runtime.cost,
-        stats: {
-          llmMs: runtime.llmMs,
-          toolMs: runtime.toolMs,
-          ttftMs: runtime.ttftMs,
-          ttftSteps: runtime.ttftSteps,
-          tokensPerSec: runtime.tokensPerSec,
-        },
-      }),
+      // 养成统计：全局累计，跨会话保留（会话 dispose 不清空）。
+      satiety: s.satiety,
+      food: s.food,
+      efficiency: s.efficiency,
+      cost: s.cost,
+      stats: {
+        llmMs: s.llmMs,
+        toolMs: s.toolMs,
+        ttftMs: s.ttftMs,
+        ttftSteps: s.ttftSteps,
+        tokensPerSec: s.tokensPerSec,
+      },
     }
   }
 }
