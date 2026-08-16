@@ -10,6 +10,9 @@ Thumbs.db
 .vscode/
 *.log
 
+# Hermes 工具临时目录（勿入库）
+.hermes-tmp.*/
+
 # Python 缓存（历史素材管线遗留）
 __pycache__/
 *.pyc
