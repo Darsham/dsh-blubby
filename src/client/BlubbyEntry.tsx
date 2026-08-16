@@ -73,10 +73,6 @@ function initialPos(): { left: number; top: number } {
 /** Step distance per doing frame (px) — constant speed in ANY direction
  * (left/right/up/down/diagonals all move the same distance per frame). */
 const SWIM_STEP_PX = 3
-/** How long a swim direction is held before it may switch (ms). */
-const SWIM_DIR_HOLD_MS = 10000
-/** Chance to switch direction when the hold expires. */
-const SWIM_DIR_SWITCH_CHANCE = 0.35
 /** Max vertical angle off horizontal (radians) — slight up/down drift. */
 const SWIM_MAX_TILT = Math.PI / 7
 
@@ -146,7 +142,6 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   const [snacks, setSnacks] = useState<{ id: number; delayMs: number }[]>([])
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const lastPosRef = useRef(pos)
-  const dirTimer = useRef<number | undefined>(undefined)
   // Current swim direction as an angle in radians: 0 → right (source facing),
   // π → left (mirrored). Vertical tilt stays within ±SWIM_MAX_TILT.
   const swimAngle = useRef(0)
@@ -292,24 +287,6 @@ export function BlubbyEntry({ snapshot, transportFailed, segments }: BlubbyInjec
   // Clear swimming flag when leaving idle (e.g. hover → waiting, working).
   useEffect(() => {
     if (track !== 'idle' || dragging) setSwimming(false)
-  }, [track, dragging])
-
-  // Direction switch timer: after the hold, maybe turn around.
-  useEffect(() => {
-    if (track !== 'idle' || dragging) return
-    const maybeSwitchDir = (): void => {
-      if (Math.random() < SWIM_DIR_SWITCH_CHANCE) {
-        // Flip horizontal, keep a random vertical tilt within bounds.
-        const tilt = (Math.random() * 2 - 1) * SWIM_MAX_TILT
-        swimAngle.current = Math.cos(swimAngle.current) > 0 ? Math.PI + tilt : tilt
-      }
-      dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
-    }
-    dirTimer.current = window.setTimeout(maybeSwitchDir, SWIM_DIR_HOLD_MS)
-    return () => {
-      if (dirTimer.current !== undefined) window.clearTimeout(dirTimer.current)
-      dirTimer.current = undefined
-    }
   }, [track, dragging])
 
   // Fish snacks: when the done track plays the open-mouth frame, drop

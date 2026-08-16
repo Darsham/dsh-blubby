@@ -1,238 +1,232 @@
 {
-  "frameMs": 125,
-  "size": 240,
-  "states": {
-    "idle": {
-      "segments": {
-        "initial": [
-          "idle_initial_01.webp",
-          "idle_initial_02.webp",
-          "idle_initial_03.webp",
-          "idle_initial_04.webp",
-          "idle_initial_05.webp"
-        ],
-        "enter": [
-          "idle_enter_06.webp",
-          "idle_enter_07.webp",
-          "idle_enter_08.webp",
-          "idle_enter_09.webp",
-          "idle_enter_10.webp",
-          "idle_enter_11.webp",
-          "idle_enter_12.webp",
-          "idle_enter_13.webp",
-          "idle_enter_14.webp",
-          "idle_enter_15.webp"
-        ],
-        "doing": [
-          "idle_doing_16.webp",
-          "idle_doing_17.webp",
-          "idle_doing_18.webp",
-          "idle_doing_19.webp",
-          "idle_doing_20.webp",
-          "idle_doing_21.webp",
-          "idle_doing_22.webp",
-          "idle_doing_23.webp",
-          "idle_doing_24.webp",
-          "idle_doing_25.webp",
-          "idle_doing_26.webp",
-          "idle_doing_27.webp",
-          "idle_doing_28.webp"
-        ],
-        "exit": [
-          "idle_exit_29.webp",
-          "idle_exit_30.webp",
-          "idle_exit_31.webp",
-          "idle_exit_32.webp"
-        ]
-      }
-    },
-    "waiting": {
-      "segments": {
-        "initial": [
-          "waiting_initial_01.webp",
-          "waiting_initial_02.webp",
-          "waiting_initial_03.webp",
-          "waiting_initial_04.webp"
-        ],
-        "enter": [
-          "waiting_enter_05.webp",
-          "waiting_enter_06.webp",
-          "waiting_enter_07.webp"
-        ],
-        "doing": [
-          "waiting_doing_08.webp",
-          "waiting_doing_09.webp",
-          "waiting_doing_10.webp",
-          "waiting_doing_11.webp",
-          "waiting_doing_12.webp",
-          "waiting_doing_13.webp",
-          "waiting_doing_14.webp",
-          "waiting_doing_15.webp",
-          "waiting_doing_16.webp",
-          "waiting_doing_17.webp",
-          "waiting_doing_18.webp",
-          "waiting_doing_19.webp",
-          "waiting_doing_20.webp"
-        ],
-        "exit": [
-          "waiting_exit_21.webp",
-          "waiting_exit_22.webp",
-          "waiting_exit_23.webp",
-          "waiting_exit_24.webp"
-        ]
-      }
-    },
-    "running": {
-      "segments": {
-        "initial": [
-          "running_initial_01.webp",
-          "running_initial_02.webp",
-          "running_initial_03.webp",
-          "running_initial_04.webp"
-        ],
-        "enter": [
-          "running_enter_05.webp",
-          "running_enter_06.webp",
-          "running_enter_07.webp",
-          "running_enter_08.webp",
-          "running_enter_09.webp",
-          "running_enter_10.webp",
-          "running_enter_11.webp"
-        ],
-        "doing": [
-          "running_doing_12.webp",
-          "running_doing_13.webp",
-          "running_doing_14.webp",
-          "running_doing_15.webp",
-          "running_doing_16.webp",
-          "running_doing_17.webp",
-          "running_doing_18.webp",
-          "running_doing_19.webp",
-          "running_doing_20.webp",
-          "running_doing_21.webp",
-          "running_doing_22.webp",
-          "running_doing_23.webp",
-          "running_doing_24.webp",
-          "running_doing_25.webp"
-        ],
-        "exit": [
-          "running_exit_26.webp",
-          "running_exit_27.webp",
-          "running_exit_28.webp",
-          "running_exit_29.webp",
-          "running_exit_30.webp",
-          "running_exit_31.webp",
-          "running_exit_32.webp"
-        ]
-      }
-    },
-    "done": {
-      "segments": {
-        "initial": [
-          "done_initial_01.webp",
-          "done_initial_02.webp",
-          "done_initial_03.webp",
-          "done_initial_04.webp",
-          "done_initial_05.webp"
-        ],
-        "enter": [
-          "done_enter_06.webp",
-          "done_enter_07.webp",
-          "done_enter_08.webp",
-          "done_enter_09.webp",
-          "done_enter_10.webp",
-          "done_enter_11.webp"
-        ],
-        "doing": [
-          "done_doing_12.webp",
-          "done_doing_13.webp",
-          "done_doing_14.webp",
-          "done_doing_15.webp",
-          "done_doing_16.webp",
-          "done_doing_17.webp",
-          "done_doing_18.webp",
-          "done_doing_19.webp",
-          "done_doing_20.webp",
-          "done_doing_21.webp"
-        ],
-        "exit": [
-          "done_exit_22.webp",
-          "done_exit_23.webp",
-          "done_exit_24.webp",
-          "done_exit_25.webp",
-          "done_exit_26.webp",
-          "done_exit_27.webp",
-          "done_exit_28.webp"
-        ]
-      }
-    },
-    "failed": {
-      "segments": {
-        "initial": [
-          "failed_initial_01.webp",
-          "failed_initial_02.webp",
-          "failed_initial_03.webp",
-          "failed_initial_04.webp",
-          "failed_initial_05.webp",
-          "failed_initial_06.webp",
-          "failed_initial_07.webp",
-          "failed_initial_08.webp"
-        ],
-        "enter": [
-          "failed_enter_09.webp",
-          "failed_enter_10.webp",
-          "failed_enter_11.webp",
-          "failed_enter_12.webp",
-          "failed_enter_13.webp",
-          "failed_enter_14.webp"
-        ],
-        "doing": [
-          "failed_doing_15.webp",
-          "failed_doing_16.webp",
-          "failed_doing_17.webp",
-          "failed_doing_18.webp",
-          "failed_doing_19.webp",
-          "failed_doing_20.webp",
-          "failed_doing_21.webp",
-          "failed_doing_22.webp",
-          "failed_doing_23.webp",
-          "failed_doing_24.webp",
-          "failed_doing_25.webp",
-          "failed_doing_26.webp",
-          "failed_doing_27.webp",
-          "failed_doing_28.webp",
-          "failed_doing_29.webp",
-          "failed_doing_30.webp"
-        ],
-        "exit": [
-          "failed_exit_31.webp",
-          "failed_exit_32.webp",
-          "failed_exit_33.webp",
-          "failed_exit_34.webp",
-          "failed_exit_35.webp",
-          "failed_exit_36.webp",
-          "failed_exit_37.webp",
-          "failed_exit_38.webp",
-          "failed_exit_39.webp",
-          "failed_exit_40.webp",
-          "failed_exit_41.webp",
-          "failed_exit_42.webp",
-          "failed_exit_43.webp",
-          "failed_exit_44.webp",
-          "failed_exit_45.webp",
-          "failed_exit_46.webp",
-          "failed_exit_47.webp",
-          "failed_exit_48.webp",
-          "failed_exit_49.webp",
-          "failed_exit_50.webp",
-          "failed_exit_51.webp",
-          "failed_exit_52.webp",
-          "failed_exit_53.webp",
-          "failed_exit_54.webp",
-          "failed_exit_55.webp",
-          "failed_exit_56.webp"
-        ]
-      }
-    }
+ "frameMs": 125,
+ "size": 240,
+ "states": {
+  "idle": {
+   "segments": {
+    "initial": [
+     "idle_initial_01.webp",
+     "idle_initial_02.webp",
+     "idle_initial_03.webp",
+     "idle_initial_04.webp",
+     "idle_initial_05.webp"
+    ],
+    "enter": [
+     "idle_enter_06.webp",
+     "idle_enter_07.webp",
+     "idle_enter_08.webp",
+     "idle_enter_09.webp",
+     "idle_enter_10.webp",
+     "idle_enter_11.webp",
+     "idle_enter_12.webp",
+     "idle_enter_13.webp",
+     "idle_enter_14.webp",
+     "idle_enter_15.webp"
+    ],
+    "doing": [
+     "idle_doing_19.webp",
+     "idle_doing_20.webp",
+     "idle_doing_21.webp",
+     "idle_doing_22.webp",
+     "idle_doing_23.webp",
+     "idle_doing_24.webp",
+     "idle_doing_25.webp"
+    ],
+    "exit": [
+     "idle_exit_29.webp",
+     "idle_exit_30.webp",
+     "idle_exit_31.webp",
+     "idle_exit_32.webp"
+    ]
+   }
+  },
+  "waiting": {
+   "segments": {
+    "initial": [
+     "waiting_initial_01.webp",
+     "waiting_initial_02.webp",
+     "waiting_initial_03.webp",
+     "waiting_initial_04.webp"
+    ],
+    "enter": [
+     "waiting_enter_05.webp",
+     "waiting_enter_06.webp",
+     "waiting_enter_07.webp"
+    ],
+    "doing": [
+     "waiting_doing_08.webp",
+     "waiting_doing_09.webp",
+     "waiting_doing_10.webp",
+     "waiting_doing_11.webp",
+     "waiting_doing_12.webp",
+     "waiting_doing_13.webp",
+     "waiting_doing_14.webp",
+     "waiting_doing_15.webp",
+     "waiting_doing_16.webp",
+     "waiting_doing_17.webp",
+     "waiting_doing_18.webp",
+     "waiting_doing_19.webp",
+     "waiting_doing_20.webp"
+    ],
+    "exit": [
+     "waiting_exit_21.webp",
+     "waiting_exit_22.webp",
+     "waiting_exit_23.webp",
+     "waiting_exit_24.webp"
+    ]
+   }
+  },
+  "running": {
+   "segments": {
+    "initial": [
+     "running_initial_01.webp",
+     "running_initial_02.webp",
+     "running_initial_03.webp",
+     "running_initial_04.webp"
+    ],
+    "enter": [
+     "running_enter_05.webp",
+     "running_enter_06.webp",
+     "running_enter_07.webp",
+     "running_enter_08.webp",
+     "running_enter_09.webp",
+     "running_enter_10.webp",
+     "running_enter_11.webp"
+    ],
+    "doing": [
+     "running_doing_12.webp",
+     "running_doing_13.webp",
+     "running_doing_14.webp",
+     "running_doing_15.webp",
+     "running_doing_16.webp",
+     "running_doing_17.webp",
+     "running_doing_18.webp",
+     "running_doing_19.webp",
+     "running_doing_20.webp",
+     "running_doing_21.webp",
+     "running_doing_22.webp",
+     "running_doing_23.webp",
+     "running_doing_24.webp",
+     "running_doing_25.webp"
+    ],
+    "exit": [
+     "running_exit_26.webp",
+     "running_exit_27.webp",
+     "running_exit_28.webp",
+     "running_exit_29.webp",
+     "running_exit_30.webp",
+     "running_exit_31.webp",
+     "running_exit_32.webp"
+    ]
+   }
+  },
+  "done": {
+   "segments": {
+    "initial": [
+     "done_initial_01.webp",
+     "done_initial_02.webp",
+     "done_initial_03.webp",
+     "done_initial_04.webp",
+     "done_initial_05.webp"
+    ],
+    "enter": [
+     "done_enter_06.webp",
+     "done_enter_07.webp",
+     "done_enter_08.webp",
+     "done_enter_09.webp",
+     "done_enter_10.webp",
+     "done_enter_11.webp"
+    ],
+    "doing": [
+     "done_doing_12.webp",
+     "done_doing_13.webp",
+     "done_doing_14.webp",
+     "done_doing_15.webp",
+     "done_doing_16.webp",
+     "done_doing_17.webp",
+     "done_doing_18.webp",
+     "done_doing_19.webp",
+     "done_doing_20.webp",
+     "done_doing_21.webp"
+    ],
+    "exit": [
+     "done_exit_22.webp",
+     "done_exit_23.webp",
+     "done_exit_24.webp",
+     "done_exit_25.webp",
+     "done_exit_26.webp",
+     "done_exit_27.webp",
+     "done_exit_28.webp"
+    ]
+   }
+  },
+  "failed": {
+   "segments": {
+    "initial": [
+     "failed_initial_01.webp",
+     "failed_initial_02.webp",
+     "failed_initial_03.webp",
+     "failed_initial_04.webp",
+     "failed_initial_05.webp",
+     "failed_initial_06.webp",
+     "failed_initial_07.webp",
+     "failed_initial_08.webp"
+    ],
+    "enter": [
+     "failed_enter_09.webp",
+     "failed_enter_10.webp",
+     "failed_enter_11.webp",
+     "failed_enter_12.webp",
+     "failed_enter_13.webp",
+     "failed_enter_14.webp"
+    ],
+    "doing": [
+     "failed_doing_15.webp",
+     "failed_doing_16.webp",
+     "failed_doing_17.webp",
+     "failed_doing_18.webp",
+     "failed_doing_19.webp",
+     "failed_doing_20.webp",
+     "failed_doing_21.webp",
+     "failed_doing_22.webp",
+     "failed_doing_23.webp",
+     "failed_doing_24.webp",
+     "failed_doing_25.webp",
+     "failed_doing_26.webp",
+     "failed_doing_27.webp",
+     "failed_doing_28.webp",
+     "failed_doing_29.webp",
+     "failed_doing_30.webp"
+    ],
+    "exit": [
+     "failed_exit_31.webp",
+     "failed_exit_32.webp",
+     "failed_exit_33.webp",
+     "failed_exit_34.webp",
+     "failed_exit_35.webp",
+     "failed_exit_36.webp",
+     "failed_exit_37.webp",
+     "failed_exit_38.webp",
+     "failed_exit_39.webp",
+     "failed_exit_40.webp",
+     "failed_exit_41.webp",
+     "failed_exit_42.webp",
+     "failed_exit_43.webp",
+     "failed_exit_44.webp",
+     "failed_exit_45.webp",
+     "failed_exit_46.webp",
+     "failed_exit_47.webp",
+     "failed_exit_48.webp",
+     "failed_exit_49.webp",
+     "failed_exit_50.webp",
+     "failed_exit_51.webp",
+     "failed_exit_52.webp",
+     "failed_exit_53.webp",
+     "failed_exit_54.webp",
+     "failed_exit_55.webp",
+     "failed_exit_56.webp"
+    ]
+   }
   }
+ }
 }
