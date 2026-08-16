@@ -26,6 +26,7 @@ export const BLUBBY_ASSET_FILES = [
   'running.mp4',
   'done.mp4',
   'failed.mp4',
+  'bg.jpg',
 ] as const
 
 /** Absolute package root, resolved from a module URL (lib/ or src/). */

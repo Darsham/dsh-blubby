@@ -41,11 +41,60 @@ const POLL_MS = 2000
 export const inject: string[] = []
 
 /**
+ * Inject the blubby wallpaper: paint the page background with the same
+ * milky-white tone as the video tracks so the pet's video box blends into
+ * the page instead of showing a visible square edge. Only the body
+ * background is touched — dsh's own panels keep their default look.
+ */
+function applyWallpaper(): () => void {
+  const style = document.createElement('style')
+  style.dataset.dshBlubbyWallpaper = ''
+  style.textContent = `
+    html {
+      background-color: #f6f0f0 !important;
+    }
+    body {
+      background-color: #f6f0f0 !important;
+      background-image: url('/blubby/bg.jpg') !important;
+      background-repeat: repeat !important;
+      background-size: auto !important;
+    }
+    /* 让 dsh 面板透出米白背景，视频方块边缘隐形 */
+    body,
+    #root,
+    #root > * {
+      background-color: transparent !important;
+    }
+    :root, body {
+      --dsw-alias-bg-base: transparent !important;
+      --dsw-alias-bg-layer-1: transparent !important;
+      --dsw-alias-bg-layer-2: transparent !important;
+      --dsw-alias-bg-layer-3: transparent !important;
+      --dsw-alias-bg-overlay: transparent !important;
+      --dsw-alias-bg-module-platform: transparent !important;
+      --dsw-specific-sidebar-fill: transparent !important;
+      --dsw-specific-menu: transparent !important;
+      --dsw-specific-selector: transparent !important;
+      --dsw-alias-button-elevated-fill: transparent !important;
+      --dsw-alias-button-floating-fill: transparent !important;
+      --dsw-specific-input-major: transparent !important;
+      --dsw-alias-markdown-code-block: transparent !important;
+      --dsw-alias-markdown-inline-code: transparent !important;
+    }
+  `
+  document.head.appendChild(style)
+  return () => {
+    style.remove()
+  }
+}
+
+/**
  * Client plugin body: mount the global blubby entry and poll loop while the
  * plugin is enabled.
  * @param ctx - client root context.
  */
 export function apply(ctx: ClientContext): void {
+  const disposeWallpaper = applyWallpaper()
   // The pet is host-global (its state has no session dimension), and the
   // official rc.6 shell declares no root-scoped slot for a global floating
   // surface — the dock is session-scoped, so a pet mounted there would vanish
@@ -115,6 +164,7 @@ export function apply(ctx: ClientContext): void {
       petRoot.unmount()
       container.remove()
       disposePoll()
+      disposeWallpaper()
     }
   }, 'blubby: cleanup')
 }
