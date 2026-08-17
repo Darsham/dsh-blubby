@@ -524,6 +524,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
   const efficiency = snapshot?.efficiency ?? null
   const stats = snapshot?.stats
   const food = snapshot?.food
+  const balance = snapshot?.balance
   const gitText = git && git.branch !== '' ? `${git.branch}${git.dirtyFiles + git.untrackedFiles > 0 ? ` ●${git.dirtyFiles + git.untrackedFiles}` : ''}` : null
   const statsStrip = (
     <div
@@ -554,6 +555,12 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
       <span>{formatCost(cost)}</span>
       <span style={{ opacity: 0.35 }}>|</span>
       <span>⚡{efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}</span>
+      {balance !== undefined && balance !== null && (
+        <>
+          <span style={{ opacity: 0.35 }}>|</span>
+          <span style={balance < 10 ? { color: '#ff6b6b' } : { color: '#7ee0a3' }}>💰 {formatCost(balance)}</span>
+        </>
+      )}
       {gitText !== null && (
         <>
           <span style={{ opacity: 0.35 }}>|</span>
@@ -624,7 +631,17 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
             系统提示词 {formatTokens(food?.systemTokens ?? 0)} · 工具 {formatTokens(food?.toolTokens ?? 0)} · 对话消息 {formatTokens(food?.chatTokens ?? 0)}
           </div>
           <div style={{ opacity: 0.85 }}>⚡ 工作效率 {efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}（缓存命中）</div>
-          <div style={{ opacity: 0.85 }}>💰 花费 {formatCost(cost)}（官方一口价）</div>
+          <div style={{ opacity: 0.85 }}>
+            💰 花费 {formatCost(cost)}
+            <span style={{ opacity: 0.6 }}> · 高峰 {formatCost(snapshot?.peakCost ?? 0)} / 空闲 {formatCost(snapshot?.offPeakCost ?? 0)}</span>
+          </div>
+          {balance !== undefined && balance !== null ? (
+            <div style={{ opacity: 0.85, color: balance < 10 ? '#ff6b6b' : '#7ee0a3' }}>
+              💳 DeepSeek 余额 {formatCost(balance)}
+            </div>
+          ) : (
+            <div style={{ opacity: 0.5 }}>💳 DeepSeek 余额 --（未配置 key / 查询失败）</div>
+          )}
           {stats !== undefined && (
             <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', opacity: 0.85 }}>
               <div>

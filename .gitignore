@@ -13,6 +13,10 @@ Thumbs.db
 # Hermes 工具临时目录（勿入库）
 .hermes-tmp.*/
 
+# 密钥与本地配置（勿入库）
+.env
+.env.*
+
 # Python 缓存（历史素材管线遗留）
 __pycache__/
 *.pyc

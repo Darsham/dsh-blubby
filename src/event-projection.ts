@@ -11,15 +11,28 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { BlubbyStateInput } from './state.ts'
 
 /**
- * DeepSeek 官方一口价（元 / 百万 tokens）——api-docs.deepseek.com
- * quick_start/pricing，2026-08-15 抓取。当前模型 deepseek-v4-flash：
- *   输入（缓存命中）0.02 / 输入（未命中）1 / 输出 2
- * ⚠️ 官方 2026-08-17 00:00 起改峰谷定价（空闲/高峰两档），用户拍板今天先
- * 按一口价，峰谷切换等通知。
+ * DeepSeek 官方峰谷定价（元 / 百万 tokens）——api-docs.deepseek.com + 官方
+ * 调价公告（2026-08-14 财经网/三湘都市报，2026-08-17 00:00 生效）：
+ *   高峰时段 9:00–12:00、14:00–18:00；空闲时段价格为高峰的一半。
+ *   当前模型 deepseek-v4-flash：
+ *     缓存命中输入：高峰 0.10 / 空闲 0.05
+ *     未命中输入：  高峰 3.00 / 空闲 1.50
+ *     输出：        高峰 9.00 / 空闲 4.50
+ * 官方未公开消费明细 API（仅 /user/balance），峰谷花费按本地事件时间戳分档累计。
  */
-export const PRICE_CACHE_HIT = 0.02
-export const PRICE_UNCACHED = 1
-export const PRICE_OUTPUT = 2
+export const PRICE_CACHE_HIT_PEAK = 0.10
+export const PRICE_CACHE_HIT_OFF = 0.05
+export const PRICE_UNCACHED_PEAK = 3.00
+export const PRICE_UNCACHED_OFF = 1.50
+export const PRICE_OUTPUT_PEAK = 9.00
+export const PRICE_OUTPUT_OFF = 4.50
+
+/** 高峰时段：9:00–12:00、14:00–18:00（本地时间，官方公告口径）。 */
+export function isPeakHour(ts = Date.now()): boolean {
+  const d = new Date(ts)
+  const h = d.getHours()
+  return (h >= 9 && h < 12) || (h >= 14 && h < 18)
+}
 
 /** 上下文窗口兜底（deepseek-v4-flash 官方 1M；request/context 会给真实值）。 */
 export const DEFAULT_CONTEXT_WINDOW = 1_000_000
@@ -35,8 +48,12 @@ export interface BlubbySessionStats {
   food: { systemTokens: number; toolTokens: number; chatTokens: number }
   /** 工作效率 = 缓存命中率（%），无输入时 null。 */
   efficiency: number | null
-  /** 累计花费（元，一口价）。 */
+  /** 累计花费（元，峰谷分档：高峰时段 / 空闲时段）。 */
   cost: number
+  /** 高峰时段累计花费（元）。 */
+  peakCost: number
+  /** 空闲时段累计花费（元）。 */
+  offPeakCost: number
   /** 累计 LLM 墙钟（ms，step/start → assistant/message）。 */
   llmMs: number
   /** 累计工具墙钟（ms，tool/call → tool/result）。 */
@@ -107,6 +124,8 @@ export function emptyProjectionRuntime(): ProjectionRuntime {
     food: { systemTokens: 0, toolTokens: 0, chatTokens: 0 },
     efficiency: null,
     cost: 0,
+    peakCost: 0,
+    offPeakCost: 0,
     llmMs: 0,
     toolMs: 0,
     ttftMs: 0,
@@ -138,12 +157,15 @@ function settleUsage(runtime: ProjectionRuntime, usage: {
   runtime.cacheReadTokens = (runtime.cacheReadTokens ?? 0) + cacheRead
   runtime.cacheWriteTokens = (runtime.cacheWriteTokens ?? 0) + cacheWrite
   runtime.outputTokens += output
-  // 花费：一口价（元/百万 tokens）。
-  runtime.cost += (
-    cacheRead * PRICE_CACHE_HIT
-    + (uncached + cacheWrite) * PRICE_UNCACHED
-    + output * PRICE_OUTPUT
-  ) / 1e6
+  // 花费：峰谷分档（元/百万 tokens）——按结算时刻判断高峰/空闲。
+  const peak = isPeakHour()
+  const priceHit = peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF
+  const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
+  const priceOutput = peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF
+  const billedCost = (cacheRead * priceHit + (uncached + cacheWrite) * priceUncached + output * priceOutput) / 1e6
+  runtime.cost += billedCost
+  if (peak) runtime.peakCost += billedCost
+  else runtime.offPeakCost += billedCost
   // 口粮结算：本 step 新增的对话/工具之外的输入归系统提示词（估算）。
   const stepChat = runtime.food.chatTokens - runtime.stepSettledChat
   const stepTool = runtime.food.toolTokens - runtime.stepSettledTool

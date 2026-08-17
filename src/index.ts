@@ -7,14 +7,20 @@
  */
 
 import { execFile } from 'node:child_process'
+import { existsSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   DEFAULT_CONTEXT_WINDOW,
-  PRICE_CACHE_HIT,
-  PRICE_OUTPUT,
-  PRICE_UNCACHED,
+  PRICE_CACHE_HIT_OFF,
+  PRICE_CACHE_HIT_PEAK,
+  PRICE_OUTPUT_OFF,
+  PRICE_OUTPUT_PEAK,
+  PRICE_UNCACHED_OFF,
+  PRICE_UNCACHED_PEAK,
   emptyProjectionRuntime,
+  isPeakHour,
   projectOfficialEvent,
   type BlubbySessionStats,
   type ProjectionRuntime,
@@ -25,7 +31,7 @@ import {
   type BlubbyStateInput,
   type BlubbyStateSnapshot,
 } from './state.ts'
-import { blubbyAssetsDir, makeBlubbyRoutes } from './routes.ts'
+import { blubbyAssetsDir, blubbyPackageRoot, makeBlubbyRoutes } from './routes.ts'
 
 /* ------------------------------------------------------------------ *
  * 官方统计口径（结构类型，避免为两个只读面新增依赖）：
@@ -84,8 +90,12 @@ interface ArchivedStats {
   decodeTokens: number
   turns: number
   steps: number
-  /** 累计花费（元，官方 usage 口径 × 一口价常量）。 */
+  /** 累计花费（元，峰谷分档：高峰时段 / 空闲时段）。 */
   cost: number
+  /** 高峰时段累计花费（元）。 */
+  peakCost: number
+  /** 空闲时段累计花费（元）。 */
+  offPeakCost: number
   /** 累计上下文消耗 token（饱腹度累计口径）。 */
   totalTokens: number
   chatTokens: number
@@ -133,6 +143,12 @@ export interface BlubbyStateView {
   food?: BlubbySessionStats['food']
   efficiency?: BlubbySessionStats['efficiency']
   cost?: BlubbySessionStats['cost']
+  /** 高峰时段累计花费（元，本地事件时间戳分档）。 */
+  peakCost?: number
+  /** 空闲时段累计花费（元，本地事件时间戳分档）。 */
+  offPeakCost?: number
+  /** DeepSeek 账户实时余额（元）；null = 未配置 key / 查询失败。 */
+  balance?: number | null
   stats?: {
     llmMs: number
     toolMs: number
@@ -174,7 +190,8 @@ export class BlubbyService extends Service {
   /** 已归档会话的官方口径累计。 */
   private readonly archived: ArchivedStats = {
     llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0,
-    turns: 0, steps: 0, cost: 0, totalTokens: 0, chatTokens: 0, toolTokens: 0, systemTokens: 0,
+    turns: 0, steps: 0, cost: 0, peakCost: 0, offPeakCost: 0,
+    totalTokens: 0, chatTokens: 0, toolTokens: 0, systemTokens: 0,
   }
   /** 最近一次 request/context 的真实上下文窗口（默认 1M）。 */
   private contextWindow = DEFAULT_CONTEXT_WINDOW
@@ -184,6 +201,10 @@ export class BlubbyService extends Service {
   private gitFetching = false
   /** git 缓存所属 cwd：切换项目（cwd 变）强制立即刷新，不走 30s 懒刷新窗口。 */
   private gitCwd: string | undefined
+  /** DeepSeek 余额缓存（元）；null = 未配置 key 或查询失败。 */
+  private balanceCache: number | null = null
+  private balanceAt = 0
+  private balanceFetching = false
 
   constructor(ctx: Context, config: BlubbyConfig = {}) {
     super(ctx, 'blubby')
@@ -207,6 +228,11 @@ export class BlubbyService extends Service {
   /** RPC: current pet state snapshot. */
   async state(): Promise<BlubbyStateView> {
     return this.view()
+  }
+
+  /** RPC: DeepSeek 账户余额（元）；null = 未配置 key / 查询失败。 */
+  async balance(): Promise<number | null> {
+    return this.refreshBalance()
   }
 
   /** Start or stop the session-activity listeners that drive the pet. */
@@ -292,16 +318,30 @@ export class BlubbyService extends Service {
     const usage = this.readTokenUsage(session)
     if (usage !== null) {
       // 官方累计投影口径（与 StatsLine 同源）：四桶 + 命中率分母。
-      this.archived.cost += usage.cacheReadTokens * PRICE_CACHE_HIT / 1e6
-        + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED / 1e6
-        + usage.outputTokens * PRICE_OUTPUT / 1e6
+      // 峰谷分档：归档时间点在高峰时段内的整段会话花费计高峰档。
+      const peak = isPeakHour()
+      const priceHit = peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF
+      const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
+      const priceOutput = peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF
+      const billed = usage.cacheReadTokens * priceHit / 1e6
+        + (usage.uncachedInputTokens + usage.cacheWriteTokens) * priceUncached / 1e6
+        + usage.outputTokens * priceOutput / 1e6
+      this.archived.cost += billed
+      if (peak) this.archived.peakCost += billed
+      else this.archived.offPeakCost += billed
       const { chat, tool } = this.foodFromNodes(session, tm)
-      const billed = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
+      const billedInput = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
       this.archived.chatTokens += chat
       this.archived.toolTokens += tool
-      this.archived.systemTokens += Math.max(0, billed - chat - tool)
+      this.archived.systemTokens += Math.max(0, billedInput - chat - tool)
     } else {
-      this.archived.cost += tm.totalTokens * PRICE_UNCACHED / 1e6
+      // 无 provider usage 锚点（估算口径）：花费按总量×未命中价近似，峰谷分档。
+      const peak = isPeakHour()
+      const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
+      const billed = tm.totalTokens * priceUncached / 1e6
+      this.archived.cost += billed
+      if (peak) this.archived.peakCost += billed
+      else this.archived.offPeakCost += billed
       const { chat, tool } = this.foodFromNodes(session, tm)
       this.archived.chatTokens += chat
       this.archived.toolTokens += tool
@@ -406,6 +446,31 @@ export class BlubbyService extends Service {
     })
   }
 
+  /** DeepSeek 余额：懒刷新（60s 节奏），返回当前缓存；失败保留上次值。 */
+  private refreshBalance(force = false): number | null {
+    if (!force && Date.now() - this.balanceAt < 60_000) {
+      return this.balanceCache
+    }
+    if (this.balanceFetching) return this.balanceCache
+    this.balanceFetching = true
+    const key = loadDeepSeekKey()
+    if (key === null) {
+      this.balanceFetching = false
+      this.balanceAt = Date.now()
+      return null
+    }
+    fetchDeepSeekBalance(key).then((value) => {
+      this.balanceCache = value
+      this.balanceAt = Date.now()
+      this.balanceFetching = false
+    }, () => {
+      // 网络/API 失败：保留上次值，30s 后重试。
+      this.balanceAt = Date.now() - 30_000
+      this.balanceFetching = false
+    })
+    return this.balanceCache
+  }
+
   /** Commit one activity as the host-global pet's most recent display state. */
   private applyActivity(session: Session, input: BlubbyStateInput): void {
     this.displaySession = session
@@ -455,9 +520,13 @@ export class BlubbyService extends Service {
           // 官方累计投影（StatsLine 同源）——整个会话日志的累计四桶，不是最近
           // 一次请求。缓存命中率 = cacheRead / (uncached+cacheRead+cacheWrite)。
           const billedInput = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
-          cost += usage.cacheReadTokens * PRICE_CACHE_HIT / 1e6
-            + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED / 1e6
-            + usage.outputTokens * PRICE_OUTPUT / 1e6
+          const peak = isPeakHour()
+          const priceHit = peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF
+          const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
+          const priceOutput = peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF
+          cost += usage.cacheReadTokens * priceHit / 1e6
+            + (usage.uncachedInputTokens + usage.cacheWriteTokens) * priceUncached / 1e6
+            + usage.outputTokens * priceOutput / 1e6
           // 官方 cacheHitPercent：分母为 0 时 null（不显示），不硬给 100。
           efficiency = billedInput > 0
             ? Math.round((usage.cacheReadTokens / billedInput) * 100)
@@ -470,7 +539,9 @@ export class BlubbyService extends Service {
           }
         } else {
           // 无 provider usage 锚点（估算口径）：花费按总量×未命中价近似。
-          cost += tm.totalTokens * PRICE_UNCACHED / 1e6
+          const peak = isPeakHour()
+          const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
+          cost += tm.totalTokens * priceUncached / 1e6
           efficiency = null
           const { chat, tool } = this.foodFromNodes(active, tm)
           food = {
@@ -517,6 +588,11 @@ export class BlubbyService extends Service {
       food,
       efficiency,
       cost,
+      // 峰谷分档累计（本地事件时间戳口径）。
+      peakCost: this.archived.peakCost,
+      offPeakCost: this.archived.offPeakCost,
+      // DeepSeek 实时余额（懒刷新，60s 节奏）。
+      balance: this.refreshBalance(),
       stats: perf,
       hidden: this.hidden,
       git: this.git,
@@ -560,4 +636,57 @@ export function apply(ctx: Context, config: BlubbyConfig = {}): void {
       for (const dispose of disposers) dispose()
     }
   }, 'blubby: routes')
+}
+
+/* ------------------------------------------------------------------ *
+ * DeepSeek 余额查询（官方 /user/balance）。
+ * Key 来源（按优先级）：环境变量 DEEPSEEK_API_KEY → 插件根目录 .env。
+ * ------------------------------------------------------------------ */
+
+/** 读取 DeepSeek API key；找不到返回 null。 */
+function loadDeepSeekKey(): string | null {
+  const env = process.env.DEEPSEEK_API_KEY
+  if (typeof env === 'string' && env.trim() !== '') return env.trim()
+  try {
+    const envFile = join(blubbyPackageRoot(import.meta.url), '.env')
+    if (!existsSync(envFile)) return null
+    const text = readFileSync(envFile, 'utf8')
+    for (const line of text.split(/\r?\n/)) {
+      const m = /^\s*DEEPSEEK_API_KEY\s*=\s*(.+?)\s*$/.exec(line)
+      if (m !== null && m[1] !== undefined) {
+        const value = m[1].trim().replace(/^["']|["']$/g, '')
+        return value === '' ? null : value
+      }
+    }
+  } catch {
+    return null
+  }
+  return null
+}
+
+/** 查询 DeepSeek 账户余额（元）；失败抛异常由调用方处理。 */
+function fetchDeepSeekBalance(apiKey: string): Promise<number> {
+  return fetch('https://api.deepseek.com/user/balance', {
+    headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
+    signal: AbortSignal.timeout(10_000),
+  }).then((response) => {
+    if (!response.ok) throw new Error(`balance http ${response.status}`)
+    return response.json() as Promise<{
+      is_available?: boolean
+      balance_infos?: { currency?: string; total_balance?: string }[]
+    }>
+  }).then((data) => {
+    for (const info of data.balance_infos ?? []) {
+      if (info.currency === 'CNY' && info.total_balance !== undefined) {
+        const value = Number(info.total_balance)
+        if (Number.isFinite(value)) return value
+      }
+    }
+    const first = data.balance_infos?.[0]
+    if (first !== undefined && first.total_balance !== undefined) {
+      const value = Number(first.total_balance)
+      if (Number.isFinite(value)) return value
+    }
+    throw new Error('balance 字段缺失')
+  })
 }
