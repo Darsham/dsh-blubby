@@ -1,5 +1,5 @@
 /**
- * BlubbyEntry — the floating 小咕噜. One React root on document.body,
+ * BlubbyEntry — the floating 蓝色大肥鱼. One React root on document.body,
  * driven by the host snapshot polled every 2s. The pet plays segmented
  * keyframe sequences (transparent webp, no mp4): each state is split into
  * initial → enter → doing → exit segments, and the playback mode per track
@@ -553,6 +553,12 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
       <span>{formatSatietyPercent(satiety?.percent, satiety?.usedTokens)}</span>
       <span style={{ opacity: 0.35 }}>|</span>
       <span>{formatCost(cost)}</span>
+      {snapshot?.legacyCost !== undefined && snapshot?.legacyCost !== null && (
+        <>
+          <span style={{ opacity: 0.35 }}>|</span>
+          <span style={{ opacity: 0.8 }}>涨价前约 {formatCost(snapshot.legacyCost)}</span>
+        </>
+      )}
       <span style={{ opacity: 0.35 }}>|</span>
       <span>⚡{efficiency !== null && efficiency !== undefined ? `${efficiency}%` : '--'}</span>
       {balance !== undefined && balance !== null && (
@@ -597,7 +603,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-        <span style={{ fontWeight: 600, fontSize: 13 }}>小咕噜 · 本次运行</span>
+        <span style={{ fontWeight: 600, fontSize: 13 }}>蓝色大肥鱼 · 本次运行</span>
         <span style={{ opacity: 0.5, fontSize: 11, cursor: 'pointer' }} onClick={() => setPanelOpen(false)}>✕</span>
       </div>
       {switching ? (
@@ -635,6 +641,9 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
             💰 花费 {formatCost(cost)}
             <span style={{ opacity: 0.6 }}> · 高峰 {formatCost(snapshot?.peakCost ?? 0)} / 空闲 {formatCost(snapshot?.offPeakCost ?? 0)}</span>
           </div>
+          {snapshot?.legacyCost !== undefined && snapshot?.legacyCost !== null && (
+            <div style={{ opacity: 0.6 }}>🕰 涨价前约 {formatCost(snapshot.legacyCost)}（同用量旧价）</div>
+          )}
           {balance !== undefined && balance !== null ? (
             <div style={{ opacity: 0.85, color: balance < 10 ? '#ff6b6b' : '#7ee0a3' }}>
               💳 DeepSeek 余额 {formatCost(balance)}
@@ -739,7 +748,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
     >
       <img
         src={frameUrl ?? ''}
-        alt="小咕噜"
+        alt="蓝色大肥鱼"
         draggable={false}
         style={{
           width: '100%',
@@ -876,7 +885,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
           boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
         }}
       >
-        🐳 召唤小咕噜
+        🐳 召唤蓝色大肥鱼
       </button>,
       document.body,
     )

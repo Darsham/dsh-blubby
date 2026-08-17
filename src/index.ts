@@ -13,10 +13,13 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   DEFAULT_CONTEXT_WINDOW,
+  PRICE_CACHE_HIT_LEGACY,
   PRICE_CACHE_HIT_OFF,
   PRICE_CACHE_HIT_PEAK,
+  PRICE_OUTPUT_LEGACY,
   PRICE_OUTPUT_OFF,
   PRICE_OUTPUT_PEAK,
+  PRICE_UNCACHED_LEGACY,
   PRICE_UNCACHED_OFF,
   PRICE_UNCACHED_PEAK,
   emptyProjectionRuntime,
@@ -96,6 +99,8 @@ interface ArchivedStats {
   peakCost: number
   /** 空闲时段累计花费（元）。 */
   offPeakCost: number
+  /** 涨价前一口价口径的累计花费（元，对比用）。 */
+  legacyCost: number
   /** 累计上下文消耗 token（饱腹度累计口径）。 */
   totalTokens: number
   chatTokens: number
@@ -147,6 +152,8 @@ export interface BlubbyStateView {
   peakCost?: number
   /** 空闲时段累计花费（元，本地事件时间戳分档）。 */
   offPeakCost?: number
+  /** 涨价前一口价口径累计花费（元，对比用）。 */
+  legacyCost?: number
   /** DeepSeek 账户实时余额（元）；null = 未配置 key / 查询失败。 */
   balance?: number | null
   stats?: {
@@ -190,7 +197,7 @@ export class BlubbyService extends Service {
   /** 已归档会话的官方口径累计。 */
   private readonly archived: ArchivedStats = {
     llmMs: 0, toolMs: 0, ttftMs: 0, ttftSteps: 0, decodeMs: 0, decodeTokens: 0,
-    turns: 0, steps: 0, cost: 0, peakCost: 0, offPeakCost: 0,
+    turns: 0, steps: 0, cost: 0, peakCost: 0, offPeakCost: 0, legacyCost: 0,
     totalTokens: 0, chatTokens: 0, toolTokens: 0, systemTokens: 0,
   }
   /** 最近一次 request/context 的真实上下文窗口（默认 1M）。 */
@@ -329,6 +336,11 @@ export class BlubbyService extends Service {
       this.archived.cost += billed
       if (peak) this.archived.peakCost += billed
       else this.archived.offPeakCost += billed
+      // 涨价前一口价重算（对比用）。
+      const legacyBilled = usage.cacheReadTokens * PRICE_CACHE_HIT_LEGACY / 1e6
+        + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED_LEGACY / 1e6
+        + usage.outputTokens * PRICE_OUTPUT_LEGACY / 1e6
+      this.archived.legacyCost += legacyBilled
       const { chat, tool } = this.foodFromNodes(session, tm)
       const billedInput = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
       this.archived.chatTokens += chat
@@ -342,6 +354,8 @@ export class BlubbyService extends Service {
       this.archived.cost += billed
       if (peak) this.archived.peakCost += billed
       else this.archived.offPeakCost += billed
+      // 估算口径下涨价前重算：总量 × 旧未命中价（1.00）。
+      this.archived.legacyCost += tm.totalTokens * PRICE_UNCACHED_LEGACY / 1e6
       const { chat, tool } = this.foodFromNodes(session, tm)
       this.archived.chatTokens += chat
       this.archived.toolTokens += tool
@@ -496,6 +510,7 @@ export class BlubbyService extends Service {
     let food: BlubbySessionStats['food'] = { systemTokens: 0, toolTokens: 0, chatTokens: 0 }
     let efficiency: number | null = null
     let cost = this.archived.cost
+    let legacyCost = this.archived.legacyCost
 
     if (active !== undefined) {
       const ss = this.readSessionStats(active)
@@ -527,6 +542,10 @@ export class BlubbyService extends Service {
           cost += usage.cacheReadTokens * priceHit / 1e6
             + (usage.uncachedInputTokens + usage.cacheWriteTokens) * priceUncached / 1e6
             + usage.outputTokens * priceOutput / 1e6
+          // 涨价前一口价重算（对比用）。
+          legacyCost += usage.cacheReadTokens * PRICE_CACHE_HIT_LEGACY / 1e6
+            + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED_LEGACY / 1e6
+            + usage.outputTokens * PRICE_OUTPUT_LEGACY / 1e6
           // 官方 cacheHitPercent：分母为 0 时 null（不显示），不硬给 100。
           efficiency = billedInput > 0
             ? Math.round((usage.cacheReadTokens / billedInput) * 100)
@@ -542,6 +561,8 @@ export class BlubbyService extends Service {
           const peak = isPeakHour()
           const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
           cost += tm.totalTokens * priceUncached / 1e6
+          // 估算口径下涨价前重算：总量 × 旧未命中价（1.00）。
+          legacyCost += tm.totalTokens * PRICE_UNCACHED_LEGACY / 1e6
           efficiency = null
           const { chat, tool } = this.foodFromNodes(active, tm)
           food = {
@@ -556,6 +577,7 @@ export class BlubbyService extends Service {
         food = s.food
         efficiency = s.efficiency
         cost += s.cost ?? 0
+        legacyCost += s.legacyCost ?? 0
         perf.tokensPerSec = s.tokensPerSec ?? null
       }
     } else {
@@ -591,6 +613,8 @@ export class BlubbyService extends Service {
       // 峰谷分档累计（本地事件时间戳口径）。
       peakCost: this.archived.peakCost,
       offPeakCost: this.archived.offPeakCost,
+      // 涨价前一口价口径累计（对比用）。
+      legacyCost,
       // DeepSeek 实时余额（懒刷新，60s 节奏）。
       balance: this.refreshBalance(),
       stats: perf,

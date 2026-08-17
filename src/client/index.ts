@@ -1,5 +1,5 @@
 /**
- * dsh-blubby browser half — mounts 小咕噜 as a global floating surface and
+ * dsh-blubby browser half — mounts 蓝色大肥鱼 as a global floating surface and
  * drives it from the host's same-origin '/api/blubby/*' JSON endpoints:
  * poll the host snapshot (~2 s), play the segmented keyframe sequence for
  * the active track (transparent webp frames served from /blubby/frames/,

@@ -27,6 +27,15 @@ export const PRICE_UNCACHED_OFF = 1.50
 export const PRICE_OUTPUT_PEAK = 9.00
 export const PRICE_OUTPUT_OFF = 4.50
 
+/**
+ * 涨价前（2026-08-16 及之前）的一口价（元 / 百万 tokens）：
+ *   缓存命中输入 0.02 / 未命中 1.00 / 输出 2.00（deepseek-v4-flash）。
+ * legacyCost 按此口径重算同一用量，用于与峰谷价对比（省了多少钱）。
+ */
+export const PRICE_CACHE_HIT_LEGACY = 0.02
+export const PRICE_UNCACHED_LEGACY = 1.00
+export const PRICE_OUTPUT_LEGACY = 2.00
+
 /** 高峰时段：9:00–12:00、14:00–18:00（本地时间，官方公告口径）。 */
 export function isPeakHour(ts = Date.now()): boolean {
   const d = new Date(ts)
@@ -54,6 +63,8 @@ export interface BlubbySessionStats {
   peakCost: number
   /** 空闲时段累计花费（元）。 */
   offPeakCost: number
+  /** 涨价前一口价口径的累计花费（元，同用量重算，用于对比）。 */
+  legacyCost: number
   /** 累计 LLM 墙钟（ms，step/start → assistant/message）。 */
   llmMs: number
   /** 累计工具墙钟（ms，tool/call → tool/result）。 */
@@ -126,6 +137,7 @@ export function emptyProjectionRuntime(): ProjectionRuntime {
     cost: 0,
     peakCost: 0,
     offPeakCost: 0,
+    legacyCost: 0,
     llmMs: 0,
     toolMs: 0,
     ttftMs: 0,
@@ -166,6 +178,9 @@ function settleUsage(runtime: ProjectionRuntime, usage: {
   runtime.cost += billedCost
   if (peak) runtime.peakCost += billedCost
   else runtime.offPeakCost += billedCost
+  // 涨价前一口价重算（对比用）：同一用量按旧价 0.02/1.00/2.00 计。
+  const legacyBilled = (cacheRead * PRICE_CACHE_HIT_LEGACY + (uncached + cacheWrite) * PRICE_UNCACHED_LEGACY + output * PRICE_OUTPUT_LEGACY) / 1e6
+  runtime.legacyCost += legacyBilled
   // 口粮结算：本 step 新增的对话/工具之外的输入归系统提示词（估算）。
   const stepChat = runtime.food.chatTokens - runtime.stepSettledChat
   const stepTool = runtime.food.toolTokens - runtime.stepSettledTool
