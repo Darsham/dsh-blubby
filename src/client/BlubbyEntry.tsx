@@ -21,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { BlubbyStateView } from '../index.ts'
 import type { BlubbyTrack } from '../state.ts'
+import { WhaleTv } from './WhaleTv.tsx'
 
 /** Segment manifest shape (mirrors assets/blubby/segments.json). */
 export interface BlubbySegments {
@@ -51,6 +52,8 @@ export interface BlubbyInjected {
   onHide: () => void
   /** Summon the hidden pet back. */
   onSummon: () => void
+  /** 修改余额预警阈值（元）。0/负 = 关闭预警。 */
+  onSetThreshold: (threshold: number) => void
 }
 
 /** Playback mode per track. */
@@ -207,7 +210,7 @@ function SatietyRing({ percent }: { percent: number | null }): JSX.Element {
  * right segmented sequence, and handles local interactions (drag, hover,
  * wander, fish snack, tap-to-open stats panel, satiety burp).
  */
-export function BlubbyEntry({ snapshot, transportFailed, segments, switching, onHide, onSummon }: BlubbyInjected): ReturnType<typeof createPortal> {
+export function BlubbyEntry({ snapshot, transportFailed, segments, switching, onHide, onSummon, onSetThreshold }: BlubbyInjected): ReturnType<typeof createPortal> {
   const hostTrack: BlubbyTrack = snapshot?.track ?? 'idle'
   // Local override: hover shows 疑惑脸 regardless of host activity.
   const [hovered, setHovered] = useState(false)
@@ -234,6 +237,11 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
   const [slapping, setSlapping] = useState(false)
   // 本地隐藏（乐观更新：点了立即消失，不等下一次 poll）。
   const [localHidden, setLocalHidden] = useState(false)
+  // 小电视：悬浮窗开关（面板「📺 小电视」按钮触发）。
+  const [tvOpen, setTvOpen] = useState(false)
+  // 预警阈值编辑：false=展示模式，true=输入模式；draft 为输入框当前值。
+  const [thresholdEditing, setThresholdEditing] = useState(false)
+  const [thresholdDraft, setThresholdDraft] = useState('')
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null)
   const lastPosRef = useRef(pos)
   const dirTimer = useRef<number | undefined>(undefined)
@@ -525,6 +533,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
   const stats = snapshot?.stats
   const food = snapshot?.food
   const balance = snapshot?.balance
+  const estimatedBalance = snapshot?.estimatedBalance
   const gitText = git && git.branch !== '' ? `${git.branch}${git.dirtyFiles + git.untrackedFiles > 0 ? ` ●${git.dirtyFiles + git.untrackedFiles}` : ''}` : null
   const statsStrip = (
     <div
@@ -651,6 +660,65 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
           ) : (
             <div style={{ opacity: 0.5 }}>💳 DeepSeek 余额 --（未配置 key / 查询失败）</div>
           )}
+          {estimatedBalance !== undefined && estimatedBalance !== null && (
+            <div style={{ opacity: 0.85, color: '#7ee0a3' }}>
+              🧮 预估剩余 {formatCost(estimatedBalance)}
+              {snapshot?.balanceAlertThreshold !== undefined && snapshot.balanceAlertThreshold > 0 && !thresholdEditing && (
+                <span style={{ opacity: 0.6 }}>
+                  {' '}· 预警阈值 {formatCost(snapshot.balanceAlertThreshold)}
+                  {' '}<button
+                    onClick={() => { setThresholdDraft(String(snapshot.balanceAlertThreshold)); setThresholdEditing(true) }}
+                    style={{
+                      background: 'transparent', border: '1px solid rgba(126,224,163,0.5)',
+                      color: '#7ee0a3', borderRadius: 4, padding: '0 6px', fontSize: 12,
+                      cursor: 'pointer', marginLeft: 4,
+                    }}
+                    title="修改预警阈值"
+                  >修改</button>
+                </span>
+              )}
+              {thresholdEditing && (
+                <span style={{ marginLeft: 6, display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                  <input
+                    autoFocus
+                    value={thresholdDraft}
+                    onChange={(e) => setThresholdDraft(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        const v = Number(thresholdDraft)
+                        if (!Number.isNaN(v) && v >= 0) { onSetThreshold(v); setThresholdEditing(false) }
+                      } else if (e.key === 'Escape') {
+                        setThresholdEditing(false)
+                      }
+                    }}
+                    style={{
+                      width: 64, background: 'rgba(0,0,0,0.4)', border: '1px solid rgba(126,224,163,0.6)',
+                      color: '#7ee0a3', borderRadius: 4, padding: '2px 6px', fontSize: 12,
+                    }}
+                  />
+                  <button
+                    onClick={() => { const v = Number(thresholdDraft); if (!Number.isNaN(v) && v >= 0) { onSetThreshold(v); setThresholdEditing(false) } }}
+                    style={{
+                      background: 'rgba(126,224,163,0.15)', border: '1px solid rgba(126,224,163,0.6)',
+                      color: '#7ee0a3', borderRadius: 4, padding: '2px 8px', fontSize: 12, cursor: 'pointer',
+                    }}
+                  >确定</button>
+                  <button
+                    onClick={() => setThresholdEditing(false)}
+                    style={{
+                      background: 'transparent', border: '1px solid rgba(255,255,255,0.3)',
+                      color: 'rgba(255,255,255,0.7)', borderRadius: 4, padding: '2px 8px', fontSize: 12, cursor: 'pointer',
+                    }}
+                  >取消</button>
+                </span>
+              )}
+            </div>
+          )}
+          {snapshot?.balanceAlertTriggered === true && (
+            <div style={{ marginTop: 6, padding: '6px 10px', borderRadius: 6, background: 'rgba(255,107,107,0.14)', border: '1px solid rgba(255,107,107,0.4)', color: '#ff6b6b', fontWeight: 600 }}>
+              ⚠️ 余额即将耗尽，请慎重规划任务
+            </div>
+          )}
           {stats !== undefined && (
             <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', opacity: 0.85 }}>
               <div>
@@ -681,6 +749,22 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
         </div>
       )}
       <div style={{ marginTop: 10, paddingTop: 8, borderTop: '1px solid rgba(255,255,255,0.08)', display: 'flex', gap: 8 }}>
+        <button
+          type="button"
+          onClick={() => setTvOpen(true)}
+          style={{
+            flex: 1,
+            padding: '5px 0',
+            borderRadius: 8,
+            border: '1px solid rgba(75,214,200,0.4)',
+            background: 'rgba(75,214,200,0.12)',
+            color: '#4bd6c8',
+            fontSize: 12,
+            cursor: 'pointer',
+          }}
+        >
+          📺 小电视
+        </button>
         <button
           type="button"
           onClick={onSlap}
@@ -845,6 +929,7 @@ export function BlubbyEntry({ snapshot, transportFailed, segments, switching, on
       )}
       {panel}
       {statsStrip}
+      {tvOpen && <WhaleTv onClose={() => setTvOpen(false)} />}
       {transportFailed && (
         <div
           style={{

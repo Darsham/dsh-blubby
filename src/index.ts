@@ -125,6 +125,12 @@ const GIT_REFRESH_MS = 30_000
 export interface BlubbyConfig {
   /** Master switch for the plugin (browser half + host routes). */
   enabled?: boolean
+  /**
+   * 余额预警阈值（元）。预估剩余余额（官方余额 − 本地精确累计成本）低于
+   * 此值时自动停止当前任务（等效用户按停止键）并提示；0 或负值 = 关闭。
+   * 默认 0.2（用户拍板 2026-08-21）。
+   */
+  balanceAlertThreshold?: number
 }
 
 /** Snapshot returned by `blubby.state`. */
@@ -156,6 +162,13 @@ export interface BlubbyStateView {
   legacyCost?: number
   /** DeepSeek 账户实时余额（元）；null = 未配置 key / 查询失败。 */
   balance?: number | null
+  /** 预估剩余余额（元）= 官方余额 − 上次余额刷新后本地精确累计成本；
+   * null = 官方余额不可用（此时预警不触发）。 */
+  estimatedBalance?: number | null
+  /** 余额预警阈值（元）；0/负值 = 预警关闭。 */
+  balanceAlertThreshold: number
+  /** 余额预警已触发（预估剩余低于阈值并自动停止了任务）。 */
+  balanceAlertTriggered: boolean
   stats?: {
     llmMs: number
     toolMs: number
@@ -210,13 +223,21 @@ export class BlubbyService extends Service {
   private gitCwd: string | undefined
   /** DeepSeek 余额缓存（元）；null = 未配置 key 或查询失败。 */
   private balanceCache: number | null = null
-  private balanceAt = 0
   private balanceFetching = false
+  /** 上次余额刷新成功时的本地精确累计成本（元）。预估剩余余额 =
+   * balanceCache − (当前累计成本 − 刷新时成本)：官方余额本身可能滞后
+   * 于本地按次结算，减去刷新后新产生的费用才是当前真实余额的最优估计。 */
+  private costAtBalanceRefresh = 0
+  /** 余额预警阈值（元）；0/负值 = 关闭。 */
+  private balanceAlertThreshold: number
+  /** 预警已触发（自动停止过任务）；余额回升到阈值之上后复位。 */
+  private balanceAlertTriggered = false
 
   constructor(ctx: Context, config: BlubbyConfig = {}) {
     super(ctx, 'blubby')
     this.machine = new BlubbyStateMachine()
     this.enabled = config.enabled ?? true
+    this.balanceAlertThreshold = config.balanceAlertThreshold ?? 0.2
     // 官方统计服务（sessionProjections / tokenMeter）是可选增强：服务不可用
     // 时宠物照常跑，只是统计面退化为空。与官方 token-meter 自身一致用动态注入。
     // 类型：官方包的类型增强未引入（结构类型策略），这里断言到本地最小面。
@@ -225,6 +246,8 @@ export class BlubbyService extends Service {
       this.official = official
     })
     this.syncActivity()
+    // 启动时查一次官方余额（此后仅用户发消息开始任务时再查，无轮询）。
+    this.refreshBalance(true)
   }
 
   /** Whether the blubby service consumes session activity while enabled. */
@@ -239,7 +262,18 @@ export class BlubbyService extends Service {
 
   /** RPC: DeepSeek 账户余额（元）；null = 未配置 key / 查询失败。 */
   async balance(): Promise<number | null> {
-    return this.refreshBalance()
+    return this.refreshBalance(true)
+  }
+
+  /** 运行时调整余额预警阈值（元）；0/负值 = 关闭。 */
+  setBalanceAlertThreshold(threshold: number): void {
+    this.balanceAlertThreshold = threshold > 0 ? threshold : 0
+    // 阈值调高可能立即命中预警；调低/关闭则解除触发标记。
+    if (this.balanceAlertThreshold <= 0) {
+      this.balanceAlertTriggered = false
+    } else {
+      this.checkBalanceAlert(undefined)
+    }
   }
 
   /** Start or stop the session-activity listeners that drive the pet. */
@@ -265,6 +299,17 @@ export class BlubbyService extends Service {
           const transition = projectOfficialEvent(event, this.stats)
           if (transition === undefined) return
           this.applyActivity(session, transition.input)
+          // 用户输入框发消息开始任务 → 立即查一次官方余额（事件驱动，
+          // 不做定时轮询）。source.kind === 'user' = 直接人类输入；
+          // plugin/inject/cron 等合成消息不触发查询。
+          if (event.type === 'user/message' && event.data.source?.kind === 'user') {
+            this.refreshBalance(true)
+          }
+          // 每次 LLM 调用结算后检查余额预警（assistant/message = 一次精确
+          // 结算完成）；其他事件不触发检查。
+          if (event.type === 'assistant/message') {
+            this.checkBalanceAlert(session)
+          }
         }),
         this.ctx.on('session/disposed', (session: Session) => {
           // 归档官方口径快照到全局累计（dispose 后 events 仍可读，官方
@@ -460,29 +505,82 @@ export class BlubbyService extends Service {
     })
   }
 
-  /** DeepSeek 余额：懒刷新（60s 节奏），返回当前缓存；失败保留上次值。 */
+  /** DeepSeek 余额：事件驱动查询。force=false 只读缓存不查官方；
+   * force=true（用户发消息开始任务时）立即查一次官方。失败保留上次值，
+   * 不做定时轮询。 */
   private refreshBalance(force = false): number | null {
-    if (!force && Date.now() - this.balanceAt < 60_000) {
-      return this.balanceCache
-    }
+    if (!force) return this.balanceCache
     if (this.balanceFetching) return this.balanceCache
     this.balanceFetching = true
     const key = loadDeepSeekKey()
     if (key === null) {
       this.balanceFetching = false
-      this.balanceAt = Date.now()
       return null
     }
     fetchDeepSeekBalance(key).then((value) => {
       this.balanceCache = value
-      this.balanceAt = Date.now()
+      this.costAtBalanceRefresh = this.totalBilledCost()
+      // 余额回升到阈值之上 → 解除预警标记（允许下次再触发）。
+      if (this.balanceAlertThreshold > 0 && value >= this.balanceAlertThreshold) {
+        this.balanceAlertTriggered = false
+      }
       this.balanceFetching = false
     }, () => {
-      // 网络/API 失败：保留上次值，30s 后重试。
-      this.balanceAt = Date.now() - 30_000
+      // 网络/API 失败：保留上次值，下次任务开始时再查。
       this.balanceFetching = false
     })
     return this.balanceCache
+  }
+
+  /** 全局精确累计成本（元，峰谷分档）：归档累计 + 活动会话官方投影。 */
+  private totalBilledCost(): number {
+    let cost = this.archived.cost
+    const active = this.displaySession
+    if (active !== undefined) {
+      const usage = this.readTokenUsage(active)
+      if (usage !== null) {
+        const peak = isPeakHour()
+        const priceHit = peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF
+        const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
+        const priceOutput = peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF
+        cost += usage.cacheReadTokens * priceHit / 1e6
+          + (usage.uncachedInputTokens + usage.cacheWriteTokens) * priceUncached / 1e6
+          + usage.outputTokens * priceOutput / 1e6
+      }
+    }
+    return cost
+  }
+
+  /** 预估剩余余额（元）= 官方余额 − 上次刷新后新产生的本地精确成本；
+   * null = 官方余额不可用（预警不触发）。 */
+  private estimatedBalance(): number | null {
+    if (this.balanceCache === null) return null
+    const spentSinceRefresh = this.totalBilledCost() - this.costAtBalanceRefresh
+    return Math.max(0, this.balanceCache - spentSinceRefresh)
+  }
+
+  /**
+   * 余额预警检查：预估剩余低于阈值 → 自动停止当前任务（等效用户按停止
+   * 键）+ 置预警标记。阈值 0/负值或官方余额不可用时不触发；一次任务
+   * 停止后直到余额回升到阈值之上才复位（防止连环误停）。
+   */
+  private checkBalanceAlert(session: Session | undefined): void {
+    const threshold = this.balanceAlertThreshold
+    if (threshold <= 0 || this.balanceAlertTriggered) return
+    const estimated = this.estimatedBalance()
+    if (estimated === null || estimated >= threshold) return
+    this.balanceAlertTriggered = true
+    // 等效用户按停止键：调 host 的 agent 注册表 cancel。dsh-agent 已把
+    // ctx.agents 声明为必选（AgentRegistry），这里不重复 declare module，
+    // 用本地最小面断言访问。
+    const agents = (this.ctx as unknown as {
+      agents?: { get(sessionId: Session['header']['id']): { cancel(cause: { kind: 'hook'; reason: string }): void } | undefined }
+    }).agents
+    const agent = session !== undefined ? agents?.get(session.header.id) : undefined
+    agent?.cancel({ kind: 'hook', reason: 'blubby: 余额即将耗尽，已自动停止任务' })
+    if (this.displaySession !== undefined) {
+      this.machine.onActivityStatus({ phase: 'failed', line: '余额即将耗尽，已停止任务' })
+    }
   }
 
   /** Commit one activity as the host-global pet's most recent display state. */
@@ -615,8 +713,12 @@ export class BlubbyService extends Service {
       offPeakCost: this.archived.offPeakCost,
       // 涨价前一口价口径累计（对比用）。
       legacyCost,
-      // DeepSeek 实时余额（懒刷新，60s 节奏）。
+      // DeepSeek 余额缓存（事件驱动：启动 + 用户发消息开始任务时查询）。
       balance: this.refreshBalance(),
+      // 预估剩余余额 + 预警状态（前端渲染警示）。
+      estimatedBalance: this.estimatedBalance(),
+      balanceAlertThreshold: this.balanceAlertThreshold,
+      balanceAlertTriggered: this.balanceAlertTriggered,
       stats: perf,
       hidden: this.hidden,
       git: this.git,

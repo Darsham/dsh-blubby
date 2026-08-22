@@ -143,6 +143,12 @@ export function makeBlubbyRoutes(deps: { service: BlubbyService; assetsDir: stri
       service.setCurrentSession(typeof body.sessionId === 'string' ? body.sessionId : undefined)
       return Promise.resolve({ ok: true })
     }),
+    postRoute(BLUBBY_API_PREFIX + '/alert-threshold', (body) => {
+      // 运行时调整余额预警阈值（元）；0/负值 = 关闭。
+      const value = typeof body.threshold === 'number' && Number.isFinite(body.threshold) ? body.threshold : 0
+      service.setBalanceAlertThreshold(value)
+      return Promise.resolve({ ok: true, threshold: value })
+    }),
   ]
 
   const assetRoute: WebRoute = {

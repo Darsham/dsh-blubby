@@ -22,6 +22,7 @@ interface BlubbyHttpApi {
   state(): Promise<BlubbyStateView>
   setVisible(visible: boolean): Promise<{ ok: boolean }>
   setCurrentSession(sessionId: string | undefined): Promise<{ ok: boolean }>
+  setAlertThreshold(threshold: number): Promise<{ ok: boolean; threshold: number }>
 }
 
 /** Same-origin JSON fetch helper. */
@@ -38,6 +39,7 @@ const blubbyApi: BlubbyHttpApi = {
   state: () => blubbyFetch('/api/blubby/state'),
   setVisible: (visible) => blubbyPost('/api/blubby/set-visible', { visible }) as Promise<{ ok: boolean }>,
   setCurrentSession: (sessionId) => blubbyPost('/api/blubby/current-session', { sessionId }) as Promise<{ ok: boolean }>,
+  setAlertThreshold: (threshold) => blubbyPost('/api/blubby/alert-threshold', { threshold }) as Promise<{ ok: boolean; threshold: number }>,
 }
 
 /** POST one JSON body to a blubby endpoint. */
@@ -116,6 +118,9 @@ export function apply(ctx: ClientContext): void {
       },
       onSummon: () => {
         void blubbyApi.setVisible(true)
+      },
+      onSetThreshold: (threshold) => {
+        void blubbyApi.setAlertThreshold(threshold)
       },
     }
     petRoot.render(createElement(BlubbyEntry, injected))
