@@ -162,8 +162,8 @@ export interface BlubbyStateView {
   legacyCost?: number
   /** DeepSeek 账户实时余额（元）；null = 未配置 key / 查询失败。 */
   balance?: number | null
-  /** 预估剩余余额（元）= 官方余额 − 上次余额刷新后本地精确累计成本；
-   * null = 官方余额不可用（此时预警不触发）。 */
+  /** 预估剩余余额（元）= 官方余额 − 尚未落账的本地精确成本（官方结算有
+   * 分钟级延迟）；null = 官方余额不可用（此时预警不触发）。 */
   estimatedBalance?: number | null
   /** 余额预警阈值（元）；0/负值 = 预警关闭。 */
   balanceAlertThreshold: number
@@ -224,10 +224,15 @@ export class BlubbyService extends Service {
   /** DeepSeek 余额缓存（元）；null = 未配置 key 或查询失败。 */
   private balanceCache: number | null = null
   private balanceFetching = false
-  /** 上次余额刷新成功时的本地精确累计成本（元）。预估剩余余额 =
-   * balanceCache − (当前累计成本 − 刷新时成本)：官方余额本身可能滞后
-   * 于本地按次结算，减去刷新后新产生的费用才是当前真实余额的最优估计。 */
-  private costAtBalanceRefresh = 0
+  /** 本地精确累计花费（元，单调不减）：按会话记「已计入」快照做增量累加，
+   * 因此切会话 / 峰谷价重算 / 会话归档都不会让总额回退。 */
+  private spentTotal = 0
+  /** 每个会话已计入 spentTotal 的花费（元），保证同一会话不被重复累加。 */
+  private readonly sessionSpent = new Map<string, number>()
+  /** 官方余额中「已落账」的累计扣费（元）：由官方余额每次下降的幅度累加
+   * 而来。官方结算有分钟级延迟，本地花费里尚未落账的部分 =
+   * spentTotal − landedCost，这部分要从官方余额里额外扣掉才是真实余额。 */
+  private landedCost = 0
   /** 余额预警阈值（元）；0/负值 = 关闭。 */
   private balanceAlertThreshold: number
   /** 预警已触发（自动停止过任务）；余额回升到阈值之上后复位。 */
@@ -356,6 +361,9 @@ export class BlubbyService extends Service {
   private archiveSession(session: Session): void {
     const official = this.official
     if (official === undefined) return
+    // 会话销毁前将其最终花费锁入余额预估的单调总额（否则切走后
+    // 这段花费就不再参与未落账量计算）。
+    this.accrueSessionSpend(session)
     const ss = this.readSessionStats(session)
     this.archived.llmMs += ss.llmMs
     this.archived.toolMs += ss.toolMs
@@ -372,19 +380,11 @@ export class BlubbyService extends Service {
       // 官方累计投影口径（与 StatsLine 同源）：四桶 + 命中率分母。
       // 峰谷分档：归档时间点在高峰时段内的整段会话花费计高峰档。
       const peak = isPeakHour()
-      const priceHit = peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF
-      const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
-      const priceOutput = peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF
-      const billed = usage.cacheReadTokens * priceHit / 1e6
-        + (usage.uncachedInputTokens + usage.cacheWriteTokens) * priceUncached / 1e6
-        + usage.outputTokens * priceOutput / 1e6
+      const { cost: billed, legacyCost: legacyBilled } = billFromUsage(usage, peak)
       this.archived.cost += billed
       if (peak) this.archived.peakCost += billed
       else this.archived.offPeakCost += billed
       // 涨价前一口价重算（对比用）。
-      const legacyBilled = usage.cacheReadTokens * PRICE_CACHE_HIT_LEGACY / 1e6
-        + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED_LEGACY / 1e6
-        + usage.outputTokens * PRICE_OUTPUT_LEGACY / 1e6
       this.archived.legacyCost += legacyBilled
       const { chat, tool } = this.foodFromNodes(session, tm)
       const billedInput = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
@@ -394,13 +394,12 @@ export class BlubbyService extends Service {
     } else {
       // 无 provider usage 锚点（估算口径）：花费按总量×未命中价近似，峰谷分档。
       const peak = isPeakHour()
-      const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
-      const billed = tm.totalTokens * priceUncached / 1e6
+      const { cost: billed, legacyCost: legacyBilled } = billFromTokens(tm.totalTokens, peak)
       this.archived.cost += billed
       if (peak) this.archived.peakCost += billed
       else this.archived.offPeakCost += billed
       // 估算口径下涨价前重算：总量 × 旧未命中价（1.00）。
-      this.archived.legacyCost += tm.totalTokens * PRICE_UNCACHED_LEGACY / 1e6
+      this.archived.legacyCost += legacyBilled
       const { chat, tool } = this.foodFromNodes(session, tm)
       this.archived.chatTokens += chat
       this.archived.toolTokens += tool
@@ -518,12 +517,7 @@ export class BlubbyService extends Service {
       return null
     }
     fetchDeepSeekBalance(key).then((value) => {
-      this.balanceCache = value
-      this.costAtBalanceRefresh = this.totalBilledCost()
-      // 余额回升到阈值之上 → 解除预警标记（允许下次再触发）。
-      if (this.balanceAlertThreshold > 0 && value >= this.balanceAlertThreshold) {
-        this.balanceAlertTriggered = false
-      }
+      this.reconcileBalance(value)
       this.balanceFetching = false
     }, () => {
       // 网络/API 失败：保留上次值，下次任务开始时再查。
@@ -532,31 +526,85 @@ export class BlubbyService extends Service {
     return this.balanceCache
   }
 
-  /** 全局精确累计成本（元，峰谷分档）：归档累计 + 活动会话官方投影。 */
-  private totalBilledCost(): number {
-    let cost = this.archived.cost
-    const active = this.displaySession
-    if (active !== undefined) {
-      const usage = this.readTokenUsage(active)
-      if (usage !== null) {
-        const peak = isPeakHour()
-        const priceHit = peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF
-        const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
-        const priceOutput = peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF
-        cost += usage.cacheReadTokens * priceHit / 1e6
-          + (usage.uncachedInputTokens + usage.cacheWriteTokens) * priceUncached / 1e6
-          + usage.outputTokens * priceOutput / 1e6
-      }
+  /**
+   * 用一次官方余额读数对账。官方余额滞后于本地按次结算（分钟级
+   * 延迟），所以不能在每次刷新时把「已花费」基线重置为当前累计——那等于
+   * 把延迟窗口内已经产生、但官方还没扣的花费整段抹掉，预估余额凭空回弹。
+   *
+   * 改为两条账并行：
+   *   - spentTotal：本地精确累计花费（单调不减）
+   *   - landedCost：官方余额已经体现的扣费（官方余额每次下降的幅度累加）
+   * 预估余额 = 官方余额 − (spentTotal − landedCost)。官方值持平（扣费未落账）
+   * 时未落账部分继续变大，预估照旧下降；官方值落账下降时未落账部分等额
+   * 缩小，预估保持连续，不会跳变、也不会重复扣。
+   * @param value - 官方 /user/balance 返回的余额（元）。
+   */
+  private reconcileBalance(value: number): void {
+    const spent = this.accrueSpend()
+    const previous = this.balanceCache
+    if (previous === null) {
+      // 首个读数：无往期官方值可对比，把此前的本地花费视为已落账（启动
+      // 时 spent 为 0，基线就是 0）。
+      this.landedCost = spent
+    } else if (value < previous) {
+      // 官方余额下降 = 这一部分扣费已落账；上限收敛到本地累计（下降幅度
+      // 超出本地口径通常是同一 key 在其他地方的用量，此时以官方值为准）。
+      this.landedCost = Math.min(spent, this.landedCost + (previous - value))
     }
-    return cost
+    // 官方值持平 = 扣费还没落账（landedCost 不动，未落账部分继续生效）；
+    // 上升 = 充值，未落账部分照旧从新余额里扣。
+    this.balanceCache = value
+    // 预警复位以预估余额为准（官方原值偏乐观，会提前解除预警）。
+    const estimated = this.estimatedBalance()
+    if (this.balanceAlertThreshold > 0 && estimated !== null && estimated >= this.balanceAlertThreshold) {
+      this.balanceAlertTriggered = false
+    }
   }
 
-  /** 预估剩余余额（元）= 官方余额 − 上次刷新后新产生的本地精确成本；
+  /** 把所有在世会话的最新花费差额计入 spentTotal，并返回单调累计总额（元）。
+   * 余额是账户级的：子代理会话 / 其他项目的并行会话同样在花钱，只看当前
+   * 显示的那一个会漏账（前端 2s 一次轮询，会话数量级很小，开销可忽略）。 */
+  private accrueSpend(): number {
+    const live = this.ctx.sessions?.list()
+    if (live === undefined) {
+      const active = this.displaySession
+      if (active !== undefined) this.accrueSessionSpend(active)
+      return this.spentTotal
+    }
+    for (const session of live) this.accrueSessionSpend(session)
+    return this.spentTotal
+  }
+
+  /** 单会话增量入账：只累加「比上次读到的更多」的部分。同一段用量在峰谷
+   * 价切换后重算金额会变小，取增量（不减）避免累计总额回退。 */
+  private accrueSessionSpend(session: Session): void {
+    const cost = this.sessionCost(session)
+    if (cost === null) return
+    const id = session.header.id as string
+    const counted = this.sessionSpent.get(id) ?? 0
+    if (cost <= counted) return
+    this.spentTotal += cost - counted
+    this.sessionSpent.set(id, cost)
+  }
+
+  /** 单个会话的当前累计花费（元，峰谷分档）：官方 tokenUsage 四桶优先，
+   * 无 usage 锚点时退化为 tokenMeter 总量 × 未命中价估算；官方服务不可用
+   * 返回 null（不参与余额预估，此时预估 = 官方余额）。 */
+  private sessionCost(session: Session): number | null {
+    const official = this.official
+    if (official === undefined) return null
+    const peak = isPeakHour()
+    const usage = this.readTokenUsage(session)
+    if (usage !== null) return billFromUsage(usage, peak).cost
+    return billFromTokens(official.tokenMeter.measure(session).totalTokens, peak).cost
+  }
+
+  /** 预估剩余余额（元）= 官方余额 − 尚未落账的本地精确花费；
    * null = 官方余额不可用（预警不触发）。 */
   private estimatedBalance(): number | null {
     if (this.balanceCache === null) return null
-    const spentSinceRefresh = this.totalBilledCost() - this.costAtBalanceRefresh
-    return Math.max(0, this.balanceCache - spentSinceRefresh)
+    const pending = Math.max(0, this.accrueSpend() - this.landedCost)
+    return Math.max(0, this.balanceCache - pending)
   }
 
   /**
@@ -633,17 +681,10 @@ export class BlubbyService extends Service {
           // 官方累计投影（StatsLine 同源）——整个会话日志的累计四桶，不是最近
           // 一次请求。缓存命中率 = cacheRead / (uncached+cacheRead+cacheWrite)。
           const billedInput = usage.uncachedInputTokens + usage.cacheReadTokens + usage.cacheWriteTokens
-          const peak = isPeakHour()
-          const priceHit = peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF
-          const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
-          const priceOutput = peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF
-          cost += usage.cacheReadTokens * priceHit / 1e6
-            + (usage.uncachedInputTokens + usage.cacheWriteTokens) * priceUncached / 1e6
-            + usage.outputTokens * priceOutput / 1e6
+          const billed = billFromUsage(usage, isPeakHour())
+          cost += billed.cost
           // 涨价前一口价重算（对比用）。
-          legacyCost += usage.cacheReadTokens * PRICE_CACHE_HIT_LEGACY / 1e6
-            + (usage.uncachedInputTokens + usage.cacheWriteTokens) * PRICE_UNCACHED_LEGACY / 1e6
-            + usage.outputTokens * PRICE_OUTPUT_LEGACY / 1e6
+          legacyCost += billed.legacyCost
           // 官方 cacheHitPercent：分母为 0 时 null（不显示），不硬给 100。
           efficiency = billedInput > 0
             ? Math.round((usage.cacheReadTokens / billedInput) * 100)
@@ -656,11 +697,10 @@ export class BlubbyService extends Service {
           }
         } else {
           // 无 provider usage 锚点（估算口径）：花费按总量×未命中价近似。
-          const peak = isPeakHour()
-          const priceUncached = peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF
-          cost += tm.totalTokens * priceUncached / 1e6
+          const billed = billFromTokens(tm.totalTokens, isPeakHour())
+          cost += billed.cost
           // 估算口径下涨价前重算：总量 × 旧未命中价（1.00）。
-          legacyCost += tm.totalTokens * PRICE_UNCACHED_LEGACY / 1e6
+          legacyCost += billed.legacyCost
           efficiency = null
           const { chat, tool } = this.foodFromNodes(active, tm)
           food = {
@@ -734,6 +774,35 @@ function emptySessionStats(): OfficialSessionStats {
 /** 数值守卫：非有限数归 0。 */
 function num(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/**
+ * 官方 tokenUsage 四桶累计 → 花费（元）：当前峰谷分档 + 涨价前一口价对比口径。
+ * @param usage - 官方累计四桶（未命中输入 / 输出 / 缓存读 / 缓存写）。
+ * @param peak - 是否高峰时段定价。
+ */
+function billFromUsage(usage: OfficialTokenUsageProjection, peak: boolean): { cost: number; legacyCost: number } {
+  const uncached = usage.uncachedInputTokens + usage.cacheWriteTokens
+  return {
+    cost: usage.cacheReadTokens * (peak ? PRICE_CACHE_HIT_PEAK : PRICE_CACHE_HIT_OFF) / 1e6
+      + uncached * (peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF) / 1e6
+      + usage.outputTokens * (peak ? PRICE_OUTPUT_PEAK : PRICE_OUTPUT_OFF) / 1e6,
+    legacyCost: usage.cacheReadTokens * PRICE_CACHE_HIT_LEGACY / 1e6
+      + uncached * PRICE_UNCACHED_LEGACY / 1e6
+      + usage.outputTokens * PRICE_OUTPUT_LEGACY / 1e6,
+  }
+}
+
+/**
+ * 无 provider usage 锚点时的估算口径：总量 × 未命中价。
+ * @param totalTokens - tokenMeter 量出的上下文总 token 数。
+ * @param peak - 是否高峰时段定价。
+ */
+function billFromTokens(totalTokens: number, peak: boolean): { cost: number; legacyCost: number } {
+  return {
+    cost: totalTokens * (peak ? PRICE_UNCACHED_PEAK : PRICE_UNCACHED_OFF) / 1e6,
+    legacyCost: totalTokens * PRICE_UNCACHED_LEGACY / 1e6,
+  }
 }
 
 /** Plugin name (the cordis roster id). */
